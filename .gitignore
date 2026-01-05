@@ -1,1 +1,26 @@
+# Environment variables
 .env
+.env.local
+.env.production
+
+# Logs
+logs/
+*.log
+
+# Node modules
+node_modules/
+
+# PM2
+.pm2/
+
+# Screenshots (debug)
+screenshots/*.png
+!screenshots/.gitkeep
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

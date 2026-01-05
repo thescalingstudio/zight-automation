@@ -1,0 +1,68 @@
+{
+  "info": {
+    "name": "Zight Webhook Tests",
+    "description": "Collection for testing Zight Webhook API",
+    "version": "1.0.0"
+  },
+  "requests": [
+    {
+      "name": "Health Check",
+      "method": "GET",
+      "url": "http://localhost:3000/health",
+      "description": "Check if webhook server is running"
+    },
+    {
+      "name": "Trigger Zight Automation (Local)",
+      "method": "POST",
+      "url": "http://localhost:3000/api/trigger-zight",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "sheetUrl": "https://docs.google.com/spreadsheets/d/1KjLsWGHVfe_opY2NZC8ggf18NPSZuR7FFk20pTAQ1bE/edit#gid=0",
+        "zightUsername": "daniel@carrotsnotsticks.com",
+        "zightPassword": "Carrotsnotsticks1"
+      },
+      "description": "Trigger automation with default test data"
+    },
+    {
+      "name": "Trigger Zight Automation (Server)",
+      "method": "POST",
+      "url": "http://193.203.164.17:3000/api/trigger-zight",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "sheetUrl": "https://docs.google.com/spreadsheets/d/YOUR_SHEET_ID/edit#gid=0",
+        "zightUsername": "your@email.com",
+        "zightPassword": "your-password"
+      },
+      "description": "Trigger automation on production server"
+    },
+    {
+      "name": "List Jobs",
+      "method": "GET",
+      "url": "http://localhost:3000/api/jobs",
+      "description": "List all executed jobs"
+    },
+    {
+      "name": "Get Job Logs",
+      "method": "GET",
+      "url": "http://localhost:3000/api/logs/job-2026-01-05T10-30-00-000Z",
+      "description": "Get logs for specific job (replace job ID)"
+    }
+  ],
+  "examples": {
+    "curl": {
+      "healthCheck": "curl http://localhost:3000/health",
+      "triggerLocal": "curl -X POST http://localhost:3000/api/trigger-zight -H 'Content-Type: application/json' -d '{\"sheetUrl\":\"https://docs.google.com/spreadsheets/d/1KjLsWGHVfe_opY2NZC8ggf18NPSZuR7FFk20pTAQ1bE/edit#gid=0\",\"zightUsername\":\"daniel@carrotsnotsticks.com\",\"zightPassword\":\"Carrotsnotsticks1\"}'",
+      "listJobs": "curl http://localhost:3000/api/jobs",
+      "getLogs": "curl http://localhost:3000/api/logs/JOB_ID"
+    },
+    "powershell": {
+      "healthCheck": "Invoke-RestMethod -Uri 'http://localhost:3000/health'",
+      "triggerLocal": "$body = @{sheetUrl='https://docs.google.com/spreadsheets/d/1KjLsWGHVfe_opY2NZC8ggf18NPSZuR7FFk20pTAQ1bE/edit#gid=0';zightUsername='daniel@carrotsnotsticks.com';zightPassword='Carrotsnotsticks1'} | ConvertTo-Json; Invoke-RestMethod -Uri 'http://localhost:3000/api/trigger-zight' -Method Post -Body $body -ContentType 'application/json'"
+    }
+  }
+}
+

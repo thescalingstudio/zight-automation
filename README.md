@@ -8,6 +8,7 @@ Automation to share files on Zight with emails from a public Google Sheet.
 - Automatically logs into Zight
 - Shares files in batches of 10 emails
 - Supports **Browserbase Cloud** or **Local Playwright**
+- **NEW:** Webhook API for Airtable integration
 
 ## 📋 Prerequisites
 
@@ -79,7 +80,9 @@ SHEET_COLUMN_NAME=Email
 
 ## 🎮 Run
 
-### Browserbase Mode (Cloud)
+### Option 1: Manual Execution
+
+#### Browserbase Mode (Cloud)
 
 ```bash
 npm start
@@ -87,7 +90,7 @@ npm start
 node zight-automation.js
 ```
 
-### Local Mode (Playwright on your PC)
+#### Local Mode (Playwright on your PC)
 
 ```bash
 npm run start:local
@@ -95,16 +98,44 @@ npm run start:local
 $env:BROWSERBASE_ENABLED="false"; node zight-automation.js
 ```
 
+### Option 2: Webhook API (Airtable Integration)
+
+Start the webhook server to receive automated triggers:
+
+```bash
+npm run webhook
+```
+
+The server will listen on port 3000 for POST requests:
+
+```
+POST http://localhost:3000/api/trigger-zight
+Content-Type: application/json
+
+{
+  "sheetUrl": "https://docs.google.com/spreadsheets/d/YOUR_ID/edit#gid=0",
+  "zightUsername": "your@email.com",
+  "zightPassword": "your-password"
+}
+```
+
+**See [WEBHOOK-SETUP.md](WEBHOOK-SETUP.md) for complete setup guide.**
+
 ## 📁 File Structure
 
 ```
-browserbase/
-├── package.json           # Dependencies
-├── env.example            # Configuration example
-├── .env                   # Your settings (create from example)
-├── zight-automation.js    # Main script
-├── README.md              # This file
-└── screenshots/           # Debug screenshots (created automatically)
+zight-automation/
+├── package.json              # Dependencies
+├── .env                      # Your settings (create from example)
+├── zight-automation.js       # Main Playwright script
+├── webhook-server.js         # NEW: Webhook API server
+├── ecosystem.config.cjs      # NEW: PM2 configuration
+├── README.md                 # This file
+├── WEBHOOK-SETUP.md          # NEW: Webhook setup guide
+├── QUICK-START.md            # NEW: Quick start guide
+├── CHANGELOG.md              # Version history
+├── logs/                     # Execution logs (auto-created)
+└── screenshots/              # Debug screenshots (auto-created)
 ```
 
 ## 🔧 How It Works
