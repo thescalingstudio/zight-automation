@@ -1,0 +1,22 @@
+{
+  "name": "zight-browserbase-automation",
+  "version": "1.0.0",
+  "description": "Zight automation using Playwright with Browserbase",
+  "main": "zight-automation.js",
+  "type": "module",
+  "scripts": {
+    "start": "node zight-automation.js",
+    "start:local": "BROWSERBASE_ENABLED=false node zight-automation.js",
+    "start:browserbase": "node zight-automation.js"
+  },
+  "dependencies": {
+    "@browserbasehq/sdk": "^2.0.0",
+    "dotenv": "^16.4.5",
+    "playwright": "^1.48.0"
+  },
+  "devDependencies": {},
+  "keywords": ["browserbase", "playwright", "zight", "automation"],
+  "author": "",
+  "license": "MIT"
+}
+
