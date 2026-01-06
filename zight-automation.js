@@ -547,6 +547,10 @@ async function fillEmailsAndSend(page, batch) {
   }
   console.log(`✅ Added: ${emailText}`);
 
+  // Screenshot BEFORE clicking submit to see the state
+  await screenshot(page, `debug_before_submit_${Date.now()}.png`);
+  console.log("📸 Screenshot taken before submit");
+
   // Try to find the submit button - prioritize data-testid="submit" (it's a span, not a button!)
   console.log("🔍 Looking for submit button...");
   let sendBtn = dialog.locator('[data-testid="submit"]').first();
@@ -571,14 +575,35 @@ async function fillEmailsAndSend(page, batch) {
     throw new Error("Could not click Send button.");
   });
 
-  // Wait for Zight to process the share
-  await wait(page, 2000);
+  // Wait longer for Zight to process the share
+  console.log("⏳ Waiting for Zight to process...");
+  await wait(page, 3000);
   
-  // Take a screenshot to see if there's any error message
-  await screenshot(page, `debug_after_send_${Date.now()}.png`);
+  // Take a screenshot to see if there's any error message or success state
+  await screenshot(page, `debug_after_submit_${Date.now()}.png`);
+  console.log("📸 Screenshot taken after submit");
+  
+  // Check if there's an error message visible in the dialog
+  const errorSelectors = [
+    'text=/error/i',
+    'text=/failed/i',
+    'text=/invalid/i',
+    '[role="alert"]',
+    '.error',
+    '.alert-error'
+  ];
+  
+  for (const selector of errorSelectors) {
+    const errorEl = dialog.locator(selector).first();
+    if (await errorEl.count() > 0) {
+      const errorText = await errorEl.textContent().catch(() => '');
+      console.log(`❌ ERROR DETECTED: ${errorText}`);
+      await screenshot(page, `error_message_${Date.now()}.png`);
+    }
+  }
 
   await page.keyboard.press("Escape").catch(() => {});
-  await wait(page, 300);
+  await wait(page, 500);
 
   console.log(`✅ Sent successfully: ${emailText}`);
 }
