@@ -707,6 +707,34 @@ async function clearExistingShares(page) {
   }
 }
 
+// ========== GET CURRENT SHARES ==========
+async function getCurrentShares(page) {
+  // Get the file ID from current URL
+  const url = page.url();
+  const fileIdMatch = url.match(/\/([a-zA-Z0-9]+)$/);
+  if (!fileIdMatch) {
+    console.log("⚠️ Could not extract file ID from URL");
+    return [];
+  }
+  
+  const fileId = fileIdMatch[1];
+  const apiUrl = `https://share.zight.com/api/v5/items/${fileId}`;
+  
+  try {
+    // Fetch current shares via API
+    const response = await page.evaluate(async (url) => {
+      const res = await fetch(url);
+      return res.json();
+    }, apiUrl);
+    
+    const specificUsers = response?.data?.item?.attributes?.security?.specific_users || [];
+    return specificUsers;
+  } catch (error) {
+    console.log(`⚠️ Could not fetch current shares: ${error.message}`);
+    return [];
+  }
+}
+
 // ========== RUN FOR ACCOUNT ==========
 async function runForAccount(page, account) {
   // 1) Read emails from sheet (before login)
@@ -720,19 +748,40 @@ async function runForAccount(page, account) {
   await login(page, account);
   await openOnlyFileFromDashboard(page);
 
-  // 3) Clear existing shares if needed (to avoid 20 person limit)
+  // 3) ALWAYS clear existing shares at the start (fresh start every time)
+  console.log("🧹 Clearing existing shares to start fresh...");
   await clearExistingShares(page);
 
-  // 4) Process batches
-  const batches = chunk(sheetEmails, CONFIG.batchSize);
+  // 4) Process emails in batches of 20 (Zight's limit)
+  // After every 20 emails, clear and continue with next batch
+  const ZIGHT_LIMIT = 20;
   const totalEmails = sheetEmails.length;
-  console.log(`📦 Processing ${totalEmails} email${totalEmails > 1 ? 's' : ''} (batch size: ${CONFIG.batchSize})`);
+  const superBatches = chunk(sheetEmails, ZIGHT_LIMIT); // Split into groups of 20
+  
+  console.log(`📦 Processing ${totalEmails} email${totalEmails > 1 ? 's' : ''}`);
+  console.log(`📊 This will be done in ${superBatches.length} super-batch${superBatches.length > 1 ? 'es' : ''} of up to ${ZIGHT_LIMIT} emails each`);
 
-  for (let i = 0; i < batches.length; i++) {
-    console.log(`\n➡️ Email ${i + 1}/${batches.length}`);
-    await openShareModal(page);
-    await fillEmailsAndSend(page, batches[i]);
-    await wait(page, 500);
+  for (let superBatchIdx = 0; superBatchIdx < superBatches.length; superBatchIdx++) {
+    const superBatch = superBatches[superBatchIdx];
+    
+    console.log(`\n📦 === Super-Batch ${superBatchIdx + 1}/${superBatches.length} (${superBatch.length} emails) ===`);
+    
+    // Process this super-batch in small batches (1 at a time for reliability)
+    const batches = chunk(superBatch, CONFIG.batchSize);
+    
+    for (let i = 0; i < batches.length; i++) {
+      const emailNum = superBatchIdx * ZIGHT_LIMIT + i + 1;
+      console.log(`\n➡️ Email ${emailNum}/${totalEmails}`);
+      await openShareModal(page);
+      await fillEmailsAndSend(page, batches[i]);
+      await wait(page, 500);
+    }
+    
+    // If there are more super-batches to process, clear the list for the next batch
+    if (superBatchIdx < superBatches.length - 1) {
+      console.log(`\n🔄 Super-batch ${superBatchIdx + 1} complete. Clearing for next batch...`);
+      await clearExistingShares(page);
+    }
   }
 
   console.log(`\n🏁 Finished: ${account.username} - Sent to ${totalEmails} email${totalEmails > 1 ? 's' : ''}`);
