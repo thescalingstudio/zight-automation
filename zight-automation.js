@@ -583,7 +583,15 @@ async function fillEmailsAndSend(page, batch) {
   await screenshot(page, `debug_after_submit_${Date.now()}.png`);
   console.log("📸 Screenshot taken after submit");
   
-  // Check if there's an error message visible in the dialog
+  // Check specifically for "Cannot update invitations" error (appears in bottom-right toast)
+  const cannotUpdateInvitations = page.locator('text=/Cannot update invitations/i').first();
+  if (await cannotUpdateInvitations.count() > 0) {
+    console.log("🚨 ERROR: Cannot update invitations - Likely hit the 20 person share limit!");
+    await screenshot(page, `error_cannot_update_invitations_${Date.now()}.png`);
+    throw new Error("Cannot update invitations - Share limit reached (20 people max). Clear existing shares first.");
+  }
+  
+  // Check for other error messages
   const errorSelectors = [
     'text=/error/i',
     'text=/failed/i',
@@ -593,13 +601,21 @@ async function fillEmailsAndSend(page, batch) {
     '.alert-error'
   ];
   
+  let errorFound = false;
   for (const selector of errorSelectors) {
-    const errorEl = dialog.locator(selector).first();
+    const errorEl = page.locator(selector).first();
     if (await errorEl.count() > 0) {
       const errorText = await errorEl.textContent().catch(() => '');
-      console.log(`❌ ERROR DETECTED: ${errorText}`);
-      await screenshot(page, `error_message_${Date.now()}.png`);
+      if (errorText && !errorText.match(/Cannot update invitations/i)) {
+        console.log(`❌ ERROR DETECTED: ${errorText}`);
+        await screenshot(page, `error_message_${Date.now()}.png`);
+        errorFound = true;
+      }
     }
+  }
+  
+  if (errorFound) {
+    throw new Error("Error detected after clicking submit button");
   }
 
   await page.keyboard.press("Escape").catch(() => {});
