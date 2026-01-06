@@ -703,22 +703,13 @@ async function clearExistingShares(page, force = false) {
       await wait(page, 300);
     }
     
-    await wait(page, 1000);
+    await wait(page, 1500);
     
-    // Step 4: Click dropdown again to switch back to "Anyone with the link can view"
-    console.log("🔼 Switching back to 'Anyone with the link can view'...");
-    const dropdownButton2 = dialog.locator('[data-testid="viewer-share-who-is-viewing"]').first();
-    if (await dropdownButton2.count() > 0) {
-      await dropdownButton2.click({ timeout: 10000 }).catch(() => {});
-      await wait(page, 1000);
-      
-      // Click "Anyone with the link can view" option
-      const anyoneOption = page.locator('[data-testid="menu-item-anyone-with-the-link-can-view"]').first();
-      if (await anyoneOption.count() > 0) {
-        await anyoneOption.click({ timeout: 10000 }).catch(() => {});
-        await wait(page, 1000);
-      }
-    }
+    // ⚠️ IMPORTANT: DO NOT switch back to "Anyone with the link can view"!
+    // If we do, the emails remain in the API's "specific_users" list and still count toward the 20 limit.
+    // We MUST stay in "Only emailed people" mode after clearing so the list is truly empty.
+    
+    console.log("✅ Staying in 'Only emailed people' mode (emails truly cleared)");
     
     // Close modal
     await page.keyboard.press("Escape").catch(() => {});
