@@ -66,6 +66,9 @@ async function waitIdle(page, timeout = 45000) {
 }
 
 async function screenshot(page, name) {
+  // Screenshots disabled for production - enable only for debugging
+  // Uncomment below to enable screenshots:
+  /*
   try {
     const screenshotsDir = join(__dirname, "screenshots");
     if (!fs.existsSync(screenshotsDir)) {
@@ -77,6 +80,7 @@ async function screenshot(page, name) {
   } catch (err) {
     console.log("⚠️ Could not take screenshot:", err.message);
   }
+  */
 }
 
 function safeName(s) {
@@ -547,10 +551,6 @@ async function fillEmailsAndSend(page, batch) {
   }
   console.log(`✅ Added: ${emailText}`);
 
-  // Screenshot BEFORE clicking submit to see the state
-  await screenshot(page, `debug_before_submit_${Date.now()}.png`);
-  console.log("📸 Screenshot taken before submit");
-
   // Try to find the submit button - prioritize data-testid="submit" (it's a span, not a button!)
   console.log("🔍 Looking for submit button...");
   let sendBtn = dialog.locator('[data-testid="submit"]').first();
@@ -571,22 +571,18 @@ async function fillEmailsAndSend(page, batch) {
 
   console.log("🖱️ Clicking submit button...");
   await sendBtn.click({ timeout: 15000 }).catch(async () => {
-    await screenshot(page, "debug_no_send_button.png");
+    await screenshot(page, "error_no_send_button.png");
     throw new Error("Could not click Send button.");
   });
 
-  // Wait longer for Zight to process the share
+  // Wait for Zight to process the share
   console.log("⏳ Waiting for Zight to process...");
   await wait(page, 3000);
-  
-  // Take a screenshot to see if there's any error message or success state
-  await screenshot(page, `debug_after_submit_${Date.now()}.png`);
-  console.log("📸 Screenshot taken after submit");
   
   // Check specifically for "Cannot update invitations" error (appears in bottom-right toast)
   const cannotUpdateInvitations = page.locator('text=/Cannot update invitations/i').first();
   if (await cannotUpdateInvitations.count() > 0) {
-    console.log("🚨 ERROR: Cannot update invitations - Likely hit the 20 person share limit!");
+    console.log("🚨 ERROR: Cannot update invitations - Share limit reached!");
     await screenshot(page, `error_cannot_update_invitations_${Date.now()}.png`);
     throw new Error("Cannot update invitations - Share limit reached (20 people max). Clear existing shares first.");
   }
@@ -597,8 +593,6 @@ async function fillEmailsAndSend(page, batch) {
     'text=/failed/i',
     'text=/invalid/i',
     '[role="alert"]',
-    '.error',
-    '.alert-error'
   ];
   
   let errorFound = false;
@@ -607,8 +601,8 @@ async function fillEmailsAndSend(page, batch) {
     if (await errorEl.count() > 0) {
       const errorText = await errorEl.textContent().catch(() => '');
       if (errorText && !errorText.match(/Cannot update invitations/i)) {
-        console.log(`❌ ERROR DETECTED: ${errorText}`);
-        await screenshot(page, `error_message_${Date.now()}.png`);
+        console.log(`❌ ERROR: ${errorText}`);
+        await screenshot(page, `error_${Date.now()}.png`);
         errorFound = true;
       }
     }
@@ -733,34 +727,6 @@ async function clearExistingShares(page, force = false) {
     console.log("✅ Existing shares cleared!");
   } catch (error) {
     console.log(`⚠️ Could not check/clear shares: ${error.message}`);
-  }
-}
-
-// ========== GET CURRENT SHARES ==========
-async function getCurrentShares(page) {
-  // Get the file ID from current URL
-  const url = page.url();
-  const fileIdMatch = url.match(/\/([a-zA-Z0-9]+)$/);
-  if (!fileIdMatch) {
-    console.log("⚠️ Could not extract file ID from URL");
-    return [];
-  }
-  
-  const fileId = fileIdMatch[1];
-  const apiUrl = `https://share.zight.com/api/v5/items/${fileId}`;
-  
-  try {
-    // Fetch current shares via API
-    const response = await page.evaluate(async (url) => {
-      const res = await fetch(url);
-      return res.json();
-    }, apiUrl);
-    
-    const specificUsers = response?.data?.item?.attributes?.security?.specific_users || [];
-    return specificUsers;
-  } catch (error) {
-    console.log(`⚠️ Could not fetch current shares: ${error.message}`);
-    return [];
   }
 }
 
