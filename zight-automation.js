@@ -693,17 +693,41 @@ async function clearExistingShares(page, force = false) {
     
     // Step 3: Find and click all remove buttons (× icons)
     console.log("❌ Removing all existing shares...");
-    const removeButtons = page.locator('[data-testid="chips-cancel"]');
-    let removeCount = await removeButtons.count();
-    console.log(`Found ${removeCount} emails to remove`);
     
-    // Click each remove button (always click the first one as they shift after removal)
-    for (let i = 0; i < Math.min(removeCount, 25); i++) {
-      await removeButtons.first().click({ timeout: 5000 }).catch(() => {});
-      await wait(page, 300);
+    let removedCount = 0;
+    const maxAttempts = 30; // Safety limit to prevent infinite loops
+    
+    // Keep clicking remove buttons until none are left (dynamic checking)
+    while (removedCount < maxAttempts) {
+      const removeButtons = page.locator('[data-testid="chips-cancel"]');
+      const currentCount = await removeButtons.count();
+      
+      if (currentCount === 0) {
+        console.log(`✅ All emails removed! (Total: ${removedCount})`);
+        break;
+      }
+      
+      // Click the first remove button
+      const clicked = await removeButtons.first().click({ timeout: 5000 }).catch(() => false);
+      
+      if (!clicked) {
+        console.log(`⚠️ Failed to click remove button #${removedCount + 1}, retrying...`);
+        await wait(page, 500);
+        continue;
+      }
+      
+      removedCount++;
+      console.log(`   Removed ${removedCount}/${currentCount}...`);
+      
+      // Wait for DOM to update before next click
+      await wait(page, 500);
     }
     
-    await wait(page, 1500);
+    if (removedCount >= maxAttempts) {
+      console.log(`⚠️ Reached max attempts (${maxAttempts}), stopping removal loop`);
+    }
+    
+    await wait(page, 1000);
     
     // ⚠️ IMPORTANT: DO NOT switch back to "Anyone with the link can view"!
     // If we do, the emails remain in the API's "specific_users" list and still count toward the 20 limit.
