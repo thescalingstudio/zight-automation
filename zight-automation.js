@@ -671,45 +671,66 @@ async function clearExistingShares(page, force = false) {
     
     const dialog = await findShareDialog(page);
     
-    // Click on "Only emailed people" dropdown option
-    console.log("🔽 Changing to 'Only emailed people'...");
-    const onlyEmailedOption = dialog.locator('text=/Only emailed people/i').first();
-    if (await onlyEmailedOption.count() > 0) {
-      await onlyEmailedOption.click({ timeout: 10000 }).catch(() => {});
+    // Step 1: Click the dropdown button to open the menu
+    console.log("🔽 Opening dropdown menu...");
+    const dropdownButton = dialog.locator('[data-testid="viewer-share-who-is-viewing"]').first();
+    if (await dropdownButton.count() === 0) {
+      console.log("⚠️ Could not find dropdown button, skipping clear");
+      await page.keyboard.press("Escape").catch(() => {});
+      await wait(page, 500);
+      return;
+    }
+    
+    await dropdownButton.click({ timeout: 10000 }).catch(() => {});
+    await wait(page, 1000);
+    
+    // Step 2: Click on "Only emailed people" option in the menu
+    console.log("🔽 Selecting 'Only emailed people'...");
+    const onlyEmailedOption = page.locator('[data-testid="menu-item-only-emailed-people"]').first();
+    if (await onlyEmailedOption.count() === 0) {
+      console.log("⚠️ Could not find 'Only emailed people' menu item, skipping clear");
+      await page.keyboard.press("Escape").catch(() => {});
+      await wait(page, 500);
+      return;
+    }
+    
+    await onlyEmailedOption.click({ timeout: 10000 }).catch(() => {});
+    await wait(page, 1500);
+    
+    // Step 3: Find and click all remove buttons (× icons)
+    console.log("❌ Removing all existing shares...");
+    const removeButtons = page.locator('[data-testid="chips-cancel"]');
+    let removeCount = await removeButtons.count();
+    console.log(`Found ${removeCount} emails to remove`);
+    
+    // Click each remove button (always click the first one as they shift after removal)
+    for (let i = 0; i < Math.min(removeCount, 25); i++) {
+      await removeButtons.first().click({ timeout: 5000 }).catch(() => {});
+      await wait(page, 300);
+    }
+    
+    await wait(page, 1000);
+    
+    // Step 4: Click dropdown again to switch back to "Anyone with the link can view"
+    console.log("🔼 Switching back to 'Anyone with the link can view'...");
+    const dropdownButton2 = dialog.locator('[data-testid="viewer-share-who-is-viewing"]').first();
+    if (await dropdownButton2.count() > 0) {
+      await dropdownButton2.click({ timeout: 10000 }).catch(() => {});
       await wait(page, 1000);
       
-      // Find all remove buttons (× icons) and click them
-      console.log("❌ Removing all existing shares...");
-      const removeButtons = dialog.locator('button[aria-label*="Remove" i], button:has-text("×"), [data-testid*="remove" i]');
-      const removeCount = await removeButtons.count();
-      console.log(`Found ${removeCount} remove buttons`);
-      
-      // Click each remove button
-      for (let i = 0; i < Math.min(removeCount, 25); i++) {
-        await removeButtons.nth(0).click({ timeout: 5000 }).catch(() => {});
-        await wait(page, 200);
-      }
-      
-      await wait(page, 1000);
-      
-      // Switch back to "Anyone with the link can view"
-      console.log("🔼 Switching back to 'Anyone with the link can view'...");
-      const anyoneOption = dialog.locator('text=/Anyone with the link can view/i').first();
+      // Click "Anyone with the link can view" option
+      const anyoneOption = page.locator('[data-testid="menu-item-anyone-with-the-link-can-view"]').first();
       if (await anyoneOption.count() > 0) {
         await anyoneOption.click({ timeout: 10000 }).catch(() => {});
         await wait(page, 1000);
       }
-      
-      // Close modal
-      await page.keyboard.press("Escape").catch(() => {});
-      await wait(page, 500);
-      
-      console.log("✅ Existing shares cleared!");
-    } else {
-      console.log("⚠️ Could not find 'Only emailed people' option, skipping clear");
-      await page.keyboard.press("Escape").catch(() => {});
-      await wait(page, 500);
     }
+    
+    // Close modal
+    await page.keyboard.press("Escape").catch(() => {});
+    await wait(page, 500);
+    
+    console.log("✅ Existing shares cleared!");
   } catch (error) {
     console.log(`⚠️ Could not check/clear shares: ${error.message}`);
   }
