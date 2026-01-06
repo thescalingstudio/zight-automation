@@ -608,6 +608,89 @@ async function fillEmailsAndSend(page, batch) {
   console.log(`✅ Sent successfully: ${emailText}`);
 }
 
+// ========== CLEAR EXISTING SHARES ==========
+async function clearExistingShares(page) {
+  console.log("🧹 Checking if we need to clear existing shares...");
+  
+  // Get the file ID from current URL
+  const url = page.url();
+  const fileIdMatch = url.match(/\/([a-zA-Z0-9]+)$/);
+  if (!fileIdMatch) {
+    console.log("⚠️ Could not extract file ID from URL, skipping clear");
+    return;
+  }
+  
+  const fileId = fileIdMatch[1];
+  const apiUrl = `https://share.zight.com/api/v5/items/${fileId}`;
+  
+  try {
+    // Fetch current shares via API
+    const response = await page.evaluate(async (url) => {
+      const res = await fetch(url);
+      return res.json();
+    }, apiUrl);
+    
+    const specificUsers = response?.data?.item?.attributes?.security?.specific_users || [];
+    const count = specificUsers.length;
+    
+    console.log(`📊 Current shares: ${count} people`);
+    
+    // If >= 18 people, clear them to avoid hitting the 20 limit
+    if (count >= 18) {
+      console.log(`⚠️ ${count} people already shared! Clearing list to avoid limit...`);
+      
+      // Open share modal
+      await openShareModal(page);
+      
+      const dialog = await findShareDialog(page);
+      
+      // Click on "Only emailed people" dropdown option
+      console.log("🔽 Changing to 'Only emailed people'...");
+      const onlyEmailedOption = dialog.locator('text=/Only emailed people/i').first();
+      if (await onlyEmailedOption.count() > 0) {
+        await onlyEmailedOption.click({ timeout: 10000 }).catch(() => {});
+        await wait(page, 1000);
+        
+        // Find all remove buttons (× icons) and click them
+        console.log("❌ Removing all existing shares...");
+        const removeButtons = dialog.locator('button[aria-label*="Remove" i], button:has-text("×"), [data-testid*="remove" i]');
+        const removeCount = await removeButtons.count();
+        console.log(`Found ${removeCount} remove buttons`);
+        
+        // Click each remove button
+        for (let i = 0; i < Math.min(removeCount, 25); i++) {
+          await removeButtons.nth(0).click({ timeout: 5000 }).catch(() => {});
+          await wait(page, 200);
+        }
+        
+        await wait(page, 1000);
+        
+        // Switch back to "Anyone with the link can view"
+        console.log("🔼 Switching back to 'Anyone with the link can view'...");
+        const anyoneOption = dialog.locator('text=/Anyone with the link can view/i').first();
+        if (await anyoneOption.count() > 0) {
+          await anyoneOption.click({ timeout: 10000 }).catch(() => {});
+          await wait(page, 1000);
+        }
+        
+        // Close modal
+        await page.keyboard.press("Escape").catch(() => {});
+        await wait(page, 500);
+        
+        console.log("✅ Existing shares cleared!");
+      } else {
+        console.log("⚠️ Could not find 'Only emailed people' option, skipping clear");
+        await page.keyboard.press("Escape").catch(() => {});
+        await wait(page, 500);
+      }
+    } else {
+      console.log(`✅ Only ${count} shares, no need to clear (limit is 20)`);
+    }
+  } catch (error) {
+    console.log(`⚠️ Could not check/clear shares: ${error.message}`);
+  }
+}
+
 // ========== RUN FOR ACCOUNT ==========
 async function runForAccount(page, account) {
   // 1) Read emails from sheet (before login)
@@ -621,7 +704,10 @@ async function runForAccount(page, account) {
   await login(page, account);
   await openOnlyFileFromDashboard(page);
 
-  // 3) Process batches
+  // 3) Clear existing shares if needed (to avoid 20 person limit)
+  await clearExistingShares(page);
+
+  // 4) Process batches
   const batches = chunk(sheetEmails, CONFIG.batchSize);
   const totalEmails = sheetEmails.length;
   console.log(`📦 Processing ${totalEmails} email${totalEmails > 1 ? 's' : ''} (batch size: ${CONFIG.batchSize})`);
