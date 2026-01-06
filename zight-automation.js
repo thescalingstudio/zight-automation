@@ -44,7 +44,7 @@ const CONFIG = {
   sheetColumnName: process.env.SHEET_COLUMN_NAME || "Email",
 
   // Other
-  batchSize: parseInt(process.env.BATCH_SIZE) || 10,
+  batchSize: parseInt(process.env.BATCH_SIZE) || 1,
   headless: process.env.HEADLESS === "true",
 };
 
@@ -230,7 +230,10 @@ async function readEmailsFromPublicSheet() {
 
   // Minimal CSV parsing (supports commas within quotes)
   const lines = csv.split(/\r?\n/).filter((l) => l && l.trim().length > 0);
-  if (lines.length < 2) return [];
+  if (lines.length < 2) {
+    console.log("⚠️ Sheet has no data rows (only headers or empty)");
+    return [];
+  }
 
   const parseLine = (line) => {
     const out = [];
@@ -255,6 +258,9 @@ async function readEmailsFromPublicSheet() {
   };
 
   const headers = parseLine(lines[0]);
+  console.log(`📊 Sheet headers: ${headers.join(", ")}`);
+  console.log(`🔍 Looking for column: "${CONFIG.sheetColumnName}"`);
+  
   const idx = headers.findIndex(
     (h) => h.trim().toLowerCase() === CONFIG.sheetColumnName.toLowerCase()
   );
@@ -265,13 +271,21 @@ async function readEmailsFromPublicSheet() {
     );
   }
 
+  console.log(`✅ Found column "${CONFIG.sheetColumnName}" at index ${idx}`);
+
   const emails = [];
   for (let i = 1; i < lines.length; i++) {
     const row = parseLine(lines[i]);
     const raw = row[idx] ?? "";
     const em = normalizeEmail(raw);
-    if (em) emails.push(em);
+    if (em) {
+      emails.push(em);
+    } else if (raw && raw.trim()) {
+      console.log(`⚠️ Row ${i}: Invalid email format: "${raw}"`);
+    }
   }
+
+  console.log(`📧 Found ${emails.length} valid emails (before deduplication)`);
 
   // Remove duplicates while preserving order
   const seen = new Set();
@@ -284,6 +298,10 @@ async function readEmailsFromPublicSheet() {
   }
 
   console.log(`✅ Loaded ${deduped.length} unique emails from sheet`);
+  if (deduped.length > 0) {
+    console.log(`📋 Sample emails: ${deduped.slice(0, 3).join(", ")}${deduped.length > 3 ? "..." : ""}`);
+  }
+  
   return deduped;
 }
 
@@ -341,6 +359,7 @@ async function openOnlyFileFromDashboard(page) {
   await ensureOnDashboard(page);
   await wait(page, 800);
 
+  console.log("🔍 Looking for first file (item-card-0) on dashboard...");
   await page
     .locator('#items.zt-grid-view .zt-dashboard-card [data-testid="item-card-0"]')
     .first()
@@ -351,6 +370,8 @@ async function openOnlyFileFromDashboard(page) {
         "Could not find #items grid / item-card-0 on dashboard."
       );
     });
+
+  console.log("✅ Found first file on dashboard");
 
   const startUrl = page.url();
   const viewerLink = page
@@ -370,16 +391,21 @@ async function openOnlyFileFromDashboard(page) {
     } catch {}
   }
 
+  console.log(`🔗 File link: ${href || "(not found)"}`);
+  console.log("🖱️ Attempting to click file to open it...");
+
   await viewerLink.click({ timeout: 15000 }).catch(() => {});
   await wait(page, 600);
 
   if (isOnDashboardUrl(page.url()) || page.url() === startUrl) {
+    console.log("⚠️ First click didn't work, trying thumbnail link...");
     await thumbLink.click({ timeout: 15000 }).catch(() => {});
     await wait(page, 600);
   }
 
   if (isOnDashboardUrl(page.url()) || page.url() === startUrl) {
     if (href && href.startsWith("/")) {
+      console.log("⚠️ Clicks didn't work, navigating directly to file URL...");
       await page.goto(`https://share.zight.com${href}`, {
         waitUntil: "domcontentloaded",
       });
@@ -498,7 +524,9 @@ async function findSendButtonNearInput(dialog, input) {
 }
 
 async function fillEmailsAndSend(page, batch) {
-  console.log(`✉️ Sending batch (${batch.length} emails)...`);
+  const emailCount = batch.length;
+  const emailText = emailCount === 1 ? batch[0] : `${emailCount} emails`;
+  console.log(`✉️ Sending: ${emailText}...`);
 
   const dialog = await findShareDialog(page);
   const input = await findAddPeopleInput(dialog);
@@ -511,25 +539,43 @@ async function fillEmailsAndSend(page, batch) {
   await input.click().catch(() => {});
   await wait(page, 200);
 
+  console.log(`📝 Adding email(s) to the input...`);
   for (const email of batch) {
     await page.keyboard.type(email, { delay: 10 }).catch(() => {});
     await page.keyboard.press("Enter").catch(() => {});
-    await wait(page, 120);
+    await wait(page, 150);
+  }
+  console.log(`✅ Added: ${emailText}`);
+
+  // Try to find the submit button - prioritize data-testid="submit" (it's a span, not a button!)
+  console.log("🔍 Looking for submit button...");
+  let sendBtn = dialog.locator('[data-testid="submit"]').first();
+  
+  // Check if found
+  const submitCount = await sendBtn.count().catch(() => 0);
+  if (submitCount > 0) {
+    console.log("✅ Found submit button by data-testid='submit'");
+  } else {
+    console.log("⚠️ Submit button with data-testid not found, trying fallback methods...");
+    // Fallback to old methods
+    sendBtn = await findSendButtonNearInput(dialog, input);
+    if (!sendBtn) {
+      console.log("⚠️ Trying xpath fallback...");
+      sendBtn = input.locator("xpath=following::button[1]");
+    }
   }
 
-  let sendBtn = await findSendButtonNearInput(dialog, input);
-  if (!sendBtn) sendBtn = input.locator("xpath=following::button[1]");
-
+  console.log("🖱️ Clicking submit button...");
   await sendBtn.click({ timeout: 15000 }).catch(async () => {
     await screenshot(page, "debug_no_send_button.png");
     throw new Error("Could not click Send button.");
   });
 
-  await wait(page, 900);
+  await wait(page, 1000);
   await page.keyboard.press("Escape").catch(() => {});
-  await wait(page, 250);
+  await wait(page, 300);
 
-  console.log("✅ Batch sent");
+  console.log(`✅ Sent successfully: ${emailText}`);
 }
 
 // ========== RUN FOR ACCOUNT ==========
@@ -547,16 +593,17 @@ async function runForAccount(page, account) {
 
   // 3) Process batches
   const batches = chunk(sheetEmails, CONFIG.batchSize);
-  console.log(`📦 Total batches: ${batches.length} (${sheetEmails.length} emails)`);
+  const totalEmails = sheetEmails.length;
+  console.log(`📦 Processing ${totalEmails} email${totalEmails > 1 ? 's' : ''} (batch size: ${CONFIG.batchSize})`);
 
   for (let i = 0; i < batches.length; i++) {
-    console.log(`➡️ Batch ${i + 1}/${batches.length}`);
+    console.log(`\n➡️ Email ${i + 1}/${batches.length}`);
     await openShareModal(page);
     await fillEmailsAndSend(page, batches[i]);
-    await wait(page, 400);
+    await wait(page, 500);
   }
 
-  console.log(`🏁 Finished: ${account.username}`);
+  console.log(`\n🏁 Finished: ${account.username} - Sent to ${totalEmails} email${totalEmails > 1 ? 's' : ''}`);
 }
 
 // ========== CREATE BROWSER ==========

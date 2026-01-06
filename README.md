@@ -6,7 +6,7 @@ Automation to share files on Zight with emails from a public Google Sheet.
 
 - Reads emails from a public Google Sheet
 - Automatically logs into Zight
-- Shares files in batches of 10 emails
+- Shares files (1 email at a time for reliability)
 - Supports **Browserbase Cloud** or **Local Playwright**
 - **NEW:** Webhook API for Airtable integration
 
