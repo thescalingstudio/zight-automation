@@ -571,7 +571,12 @@ async function fillEmailsAndSend(page, batch) {
     throw new Error("Could not click Send button.");
   });
 
-  await wait(page, 1000);
+  // Wait for Zight to process the share
+  await wait(page, 2000);
+  
+  // Take a screenshot to see if there's any error message
+  await screenshot(page, `debug_after_send_${Date.now()}.png`);
+
   await page.keyboard.press("Escape").catch(() => {});
   await wait(page, 300);
 
