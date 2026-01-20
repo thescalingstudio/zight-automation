@@ -9,6 +9,11 @@ import dotenv from "dotenv";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import fs from "fs";
+import {
+  logVideoSharesBatch,
+  updateCampaignLeads,
+  isSupabaseEnabled,
+} from "./supabase-client.js";
 
 // Load environment variables
 const __filename = fileURLToPath(import.meta.url);
@@ -46,6 +51,10 @@ const CONFIG = {
   // Other
   batchSize: parseInt(process.env.BATCH_SIZE) || 1,
   headless: process.env.HEADLESS === "true",
+
+  // Campaign tracking (from webhook)
+  campaignId: process.env.CAMPAIGN_ID || null,
+  campaignNumber: process.env.CAMPAIGN_NUMBER || null,
 };
 
 // ========== HELPERS ==========
@@ -527,7 +536,7 @@ async function findSendButtonNearInput(dialog, input) {
   return null;
 }
 
-async function fillEmailsAndSend(page, batch) {
+async function fillEmailsAndSend(page, batch, campaignId, zightAccount, googleSheetLink) {
   const emailCount = batch.length;
   const emailText = emailCount === 1 ? batch[0] : `${emailCount} emails`;
   console.log(`✉️ Sending: ${emailText}...`);
@@ -583,6 +592,20 @@ async function fillEmailsAndSend(page, batch) {
   const cannotUpdateInvitations = page.locator('text=/Cannot update invitations/i').first();
   if (await cannotUpdateInvitations.count() > 0) {
     console.log("🚨 ERROR: Cannot update invitations - Share limit reached!");
+    
+    // Log failed shares to Supabase
+    if (campaignId && isSupabaseEnabled()) {
+      const failedShares = batch.map(email => ({
+        campaignId,
+        email,
+        zightAccount,
+        googleSheetLink,
+        status: "failed",
+        errorMessage: "Share limit reached (20 people max)",
+      }));
+      await logVideoSharesBatch(failedShares);
+    }
+    
     await screenshot(page, `error_cannot_update_invitations_${Date.now()}.png`);
     throw new Error("Cannot update invitations - Share limit reached (20 people max). Clear existing shares first.");
   }
@@ -596,12 +619,14 @@ async function fillEmailsAndSend(page, batch) {
   ];
   
   let errorFound = false;
+  let errorMessage = "";
   for (const selector of errorSelectors) {
     const errorEl = page.locator(selector).first();
     if (await errorEl.count() > 0) {
       const errorText = await errorEl.textContent().catch(() => '');
       if (errorText && !errorText.match(/Cannot update invitations/i)) {
         console.log(`❌ ERROR: ${errorText}`);
+        errorMessage = errorText;
         await screenshot(page, `error_${Date.now()}.png`);
         errorFound = true;
       }
@@ -609,7 +634,33 @@ async function fillEmailsAndSend(page, batch) {
   }
   
   if (errorFound) {
+    // Log failed shares to Supabase
+    if (campaignId && isSupabaseEnabled()) {
+      const failedShares = batch.map(email => ({
+        campaignId,
+        email,
+        zightAccount,
+        googleSheetLink,
+        status: "failed",
+        errorMessage,
+      }));
+      await logVideoSharesBatch(failedShares);
+    }
+    
     throw new Error("Error detected after clicking submit button");
+  }
+
+  // Success! Log to Supabase
+  if (campaignId && isSupabaseEnabled()) {
+    const successfulShares = batch.map(email => ({
+      campaignId,
+      email,
+      zightAccount,
+      googleSheetLink,
+      status: "sent",
+    }));
+    await logVideoSharesBatch(successfulShares);
+    console.log(`💾 Logged ${batch.length} video share(s) to Supabase`);
   }
 
   await page.keyboard.press("Escape").catch(() => {});
@@ -747,11 +798,25 @@ async function clearExistingShares(page, force = false) {
 
 // ========== RUN FOR ACCOUNT ==========
 async function runForAccount(page, account) {
+  const campaignId = CONFIG.campaignId;
+  const campaignNumber = CONFIG.campaignNumber;
+  const googleSheetLink = `https://docs.google.com/spreadsheets/d/${CONFIG.sheetSpreadsheetId}/edit#gid=${CONFIG.sheetGid}`;
+  
+  // Log campaign info if available
+  if (campaignNumber) {
+    console.log(`📋 Campaign: #${campaignNumber} (ID: ${campaignId || 'N/A'})`);
+  }
+
   // 1) Read emails from sheet (before login)
   const sheetEmails = await readEmailsFromPublicSheet();
   if (!sheetEmails.length) {
     console.log("⚠️ No emails found in sheet. Nothing to send.");
     return;
+  }
+
+  // Update total_leads in Supabase (if campaign exists)
+  if (campaignId && isSupabaseEnabled()) {
+    await updateCampaignLeads(campaignId, sheetEmails.length);
   }
 
   // 2) Login + open file
@@ -770,6 +835,12 @@ async function runForAccount(page, account) {
   
   console.log(`📦 Processing ${totalEmails} email${totalEmails > 1 ? 's' : ''}`);
   console.log(`📊 This will be done in ${superBatches.length} super-batch${superBatches.length > 1 ? 'es' : ''} of up to ${ZIGHT_LIMIT} emails each`);
+  
+  if (isSupabaseEnabled()) {
+    console.log(`💾 Supabase logging: Enabled`);
+  } else {
+    console.log(`⚠️ Supabase logging: Disabled (no credentials in .env)`);
+  }
 
   for (let superBatchIdx = 0; superBatchIdx < superBatches.length; superBatchIdx++) {
     const superBatch = superBatches[superBatchIdx];
@@ -783,7 +854,7 @@ async function runForAccount(page, account) {
       const emailNum = superBatchIdx * ZIGHT_LIMIT + i + 1;
       console.log(`\n➡️ Email ${emailNum}/${totalEmails}`);
       await openShareModal(page);
-      await fillEmailsAndSend(page, batches[i]);
+      await fillEmailsAndSend(page, batches[i], campaignId, account.username, googleSheetLink);
       await wait(page, 500);
     }
     
@@ -795,6 +866,10 @@ async function runForAccount(page, account) {
   }
 
   console.log(`\n🏁 Finished: ${account.username} - Sent to ${totalEmails} email${totalEmails > 1 ? 's' : ''}`);
+  
+  if (campaignNumber) {
+    console.log(`📊 Campaign #${campaignNumber} completed. Check Supabase for detailed stats.`);
+  }
 }
 
 // ========== CREATE BROWSER ==========

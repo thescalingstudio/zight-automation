@@ -11,6 +11,12 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
+import {
+  createCampaign,
+  updateCampaignStatus,
+  parseGoogleSheetUrl as parseSheetUrlSupabase,
+  isSupabaseEnabled,
+} from "./supabase-client.js";
 
 const execPromise = promisify(exec);
 
@@ -109,7 +115,7 @@ function ensureLogsDir() {
 /**
  * Execute Zight automation script with parameters
  */
-async function executeZightScript(sheetUrl, zightUsername, zightPassword) {
+async function executeZightScript(sheetUrl, zightUsername, zightPassword, submittedBy = null) {
   const { spreadsheetId, gid } = parseGoogleSheetUrl(sheetUrl);
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const jobId = `job-${timestamp}`;
@@ -120,21 +126,42 @@ async function executeZightScript(sheetUrl, zightUsername, zightPassword) {
   console.log(`📊 Sheet ID: ${spreadsheetId}, GID: ${gid}`);
   console.log(`👤 User: ${zightUsername}`);
 
-  // Build environment variables
-  const env = {
-    ...process.env,
-    BROWSERBASE_ENABLED: "false",
-    HEADLESS: "true",
-    SHEET_SPREADSHEET_ID: spreadsheetId,
-    SHEET_GID: gid,
-    ZIGHT_USERNAME: zightUsername,
-    ZIGHT_PASSWORD: zightPassword,
-  };
-
-  // Execute the script
-  const command = `node zight-automation.js`;
+  let campaign = null;
 
   try {
+    // 1. Create campaign in Supabase (if enabled)
+    if (isSupabaseEnabled()) {
+      console.log("💾 Creating campaign in Supabase...");
+      campaign = await createCampaign({
+        sheetUrl,
+        sheetId: spreadsheetId,
+        sheetGid: gid,
+        zightUsername,
+        submittedBy,
+      });
+      console.log(`📋 Campaign: #${campaign.campaign_number} (ID: ${campaign.id})`);
+
+      // 2. Update status to in_progress
+      await updateCampaignStatus(campaign.id, "in_progress");
+    }
+
+    // Build environment variables
+    const env = {
+      ...process.env,
+      BROWSERBASE_ENABLED: "false",
+      HEADLESS: "true",
+      SHEET_SPREADSHEET_ID: spreadsheetId,
+      SHEET_GID: gid,
+      ZIGHT_USERNAME: zightUsername,
+      ZIGHT_PASSWORD: zightPassword,
+      // Pass campaign info to automation script
+      CAMPAIGN_ID: campaign?.id || "",
+      CAMPAIGN_NUMBER: campaign?.campaign_number?.toString() || "",
+    };
+
+    // Execute the script
+    const command = `node zight-automation.js`;
+
     console.log(`🚀 Executing: ${command}`);
     console.log(`📝 Logs will be saved to: ${logFile}`);
 
@@ -149,11 +176,18 @@ async function executeZightScript(sheetUrl, zightUsername, zightPassword) {
     const logs = `STDOUT:\n${stdout}\n\nSTDERR:\n${stderr}`;
     fs.writeFileSync(logFile, logs);
 
+    // 3. Update campaign status to completed (if Supabase enabled)
+    if (campaign?.id) {
+      await updateCampaignStatus(campaign.id, "completed");
+    }
+
     console.log(`✅ Job ${jobId} completed successfully`);
 
     return {
       success: true,
       jobId,
+      campaignId: campaign?.id,
+      campaignNumber: campaign?.campaign_number,
       stdout,
       stderr,
       logFile,
@@ -167,9 +201,16 @@ async function executeZightScript(sheetUrl, zightUsername, zightPassword) {
     }\n\nSTDERR:\n${error.stderr || ""}`;
     fs.writeFileSync(logFile, errorLogs);
 
+    // 4. Update campaign status to failed (if campaign was created)
+    if (campaign?.id) {
+      await updateCampaignStatus(campaign.id, "failed", error.message);
+    }
+
     return {
       success: false,
       jobId,
+      campaignId: campaign?.id,
+      campaignNumber: campaign?.campaign_number,
       error: error.message,
       stdout: error.stdout,
       stderr: error.stderr,
@@ -245,14 +286,15 @@ app.post("/api/trigger-zight", async (req, res) => {
       });
     }
 
-    const { sheetUrl, zightUsername, zightPassword } = req.body;
+    const { sheetUrl, zightUsername, zightPassword, submittedBy } = req.body;
 
     // Execute the script (synchronously for now - can be made async with job queue)
     console.log("⏳ Starting Zight automation...");
     const result = await executeZightScript(
       sheetUrl,
       zightUsername,
-      zightPassword
+      zightPassword,
+      submittedBy
     );
 
     if (result.success) {
@@ -260,6 +302,8 @@ app.post("/api/trigger-zight", async (req, res) => {
         success: true,
         message: "Zight automation completed successfully",
         jobId: result.jobId,
+        campaignId: result.campaignId,
+        campaignNumber: result.campaignNumber,
         logFile: result.logFile,
       });
     } else {
@@ -268,6 +312,8 @@ app.post("/api/trigger-zight", async (req, res) => {
         message: "Zight automation failed",
         error: result.error,
         jobId: result.jobId,
+        campaignId: result.campaignId,
+        campaignNumber: result.campaignNumber,
         logFile: result.logFile,
       });
     }
@@ -351,6 +397,107 @@ app.get("/api/jobs", (req, res) => {
   }
 });
 
+/**
+ * Get all campaigns
+ * GET /api/campaigns
+ */
+app.get("/api/campaigns", async (req, res) => {
+  try {
+    if (!isSupabaseEnabled()) {
+      return res.status(503).json({
+        success: false,
+        error: "Supabase is not enabled. Check SUPABASE_URL and SUPABASE_ANON_KEY in .env",
+      });
+    }
+
+    const { getCampaigns } = await import("./supabase-client.js");
+    
+    const status = req.query.status;
+    const limit = req.query.limit ? parseInt(req.query.limit) : undefined;
+    
+    const campaigns = await getCampaigns({ status, limit });
+
+    res.json({
+      success: true,
+      count: campaigns.length,
+      campaigns,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * Get campaign statistics
+ * GET /api/campaigns/:campaignNumber/stats
+ */
+app.get("/api/campaigns/:campaignNumber/stats", async (req, res) => {
+  try {
+    if (!isSupabaseEnabled()) {
+      return res.status(503).json({
+        success: false,
+        error: "Supabase is not enabled. Check SUPABASE_URL and SUPABASE_ANON_KEY in .env",
+      });
+    }
+
+    const { getCampaignStats } = await import("./supabase-client.js");
+    const campaignNumber = parseInt(req.params.campaignNumber);
+
+    const stats = await getCampaignStats(campaignNumber);
+
+    if (!stats) {
+      return res.status(404).json({
+        success: false,
+        error: `Campaign #${campaignNumber} not found`,
+      });
+    }
+
+    res.json({
+      success: true,
+      stats,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
+/**
+ * Get video shares for a campaign
+ * GET /api/campaigns/:campaignId/shares
+ */
+app.get("/api/campaigns/:campaignId/shares", async (req, res) => {
+  try {
+    if (!isSupabaseEnabled()) {
+      return res.status(503).json({
+        success: false,
+        error: "Supabase is not enabled. Check SUPABASE_URL and SUPABASE_ANON_KEY in .env",
+      });
+    }
+
+    const { getVideoShares } = await import("./supabase-client.js");
+    const { campaignId } = req.params;
+
+    const shares = await getVideoShares(campaignId);
+
+    res.json({
+      success: true,
+      count: shares.length,
+      shares,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
 // ========== START SERVER ==========
 app.listen(PORT, () => {
   console.log("\n" + "=".repeat(50));
@@ -360,6 +507,7 @@ app.listen(PORT, () => {
   console.log(`🔗 Webhook URL: http://localhost:${PORT}/api/trigger-zight`);
   console.log(`🏥 Health check: http://localhost:${PORT}/health`);
   console.log(`🔑 API Key: ${API_KEY} (change in production)`);
+  console.log(`💾 Supabase: ${isSupabaseEnabled() ? "Enabled" : "Disabled"}`);
   console.log("=".repeat(50) + "\n");
 });
 
