@@ -165,14 +165,26 @@ async function executeZightScript(sheetUrl, zightUsername, zightPassword, submit
     console.log(`🚀 Executing: ${command}`);
     console.log(`📝 Logs will be saved to: ${logFile}`);
 
-    // Execute and capture output
+    // Execute and stream output in real-time
     const { stdout, stderr } = await execPromise(command, {
       env,
       cwd: __dirname,
       maxBuffer: 10 * 1024 * 1024, // 10MB buffer
     });
 
-    // Save logs
+    // Print stdout to console for Coolify logs
+    if (stdout) {
+      console.log("📋 Automation Output:");
+      console.log(stdout);
+    }
+
+    // Print stderr to console (warnings, etc)
+    if (stderr) {
+      console.log("⚠️  Automation Warnings:");
+      console.log(stderr);
+    }
+
+    // Save logs to file
     const logs = `STDOUT:\n${stdout}\n\nSTDERR:\n${stderr}`;
     fs.writeFileSync(logFile, logs);
 
@@ -194,6 +206,17 @@ async function executeZightScript(sheetUrl, zightUsername, zightPassword, submit
     };
   } catch (error) {
     console.error(`❌ Job ${jobId} failed:`, error.message);
+
+    // Print error details to console
+    if (error.stdout) {
+      console.log("📋 Partial Output:");
+      console.log(error.stdout);
+    }
+
+    if (error.stderr) {
+      console.log("⚠️  Error Details:");
+      console.log(error.stderr);
+    }
 
     // Save error logs
     const errorLogs = `ERROR:\n${error.message}\n\nSTDOUT:\n${
@@ -290,6 +313,12 @@ app.post("/api/trigger-zight", async (req, res) => {
 
     // Execute the script (synchronously for now - can be made async with job queue)
     console.log("⏳ Starting Zight automation...");
+    console.log(`📊 Sheet: ${sheetUrl}`);
+    console.log(`👤 Account: ${zightUsername}`);
+    if (submittedBy) {
+      console.log(`📝 Submitted by: ${submittedBy}`);
+    }
+    
     const result = await executeZightScript(
       sheetUrl,
       zightUsername,
@@ -298,6 +327,9 @@ app.post("/api/trigger-zight", async (req, res) => {
     );
 
     if (result.success) {
+      console.log("✅ Automation completed successfully!");
+      console.log(`📊 Campaign: #${result.campaignNumber} (${result.campaignId})`);
+      
       return res.json({
         success: true,
         message: "Zight automation completed successfully",
@@ -307,6 +339,9 @@ app.post("/api/trigger-zight", async (req, res) => {
         logFile: result.logFile,
       });
     } else {
+      console.log("❌ Automation failed!");
+      console.log(`🔍 Check logs: ${result.logFile}`);
+      
       return res.status(500).json({
         success: false,
         message: "Zight automation failed",

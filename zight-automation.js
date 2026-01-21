@@ -553,12 +553,14 @@ async function fillEmailsAndSend(page, batch, campaignId, zightAccount, googleSh
   await wait(page, 200);
 
   console.log(`📝 Adding email(s) to the input...`);
-  for (const email of batch) {
+  for (let i = 0; i < batch.length; i++) {
+    const email = batch[i];
+    console.log(`  📧 [${i + 1}/${batch.length}] Adding: ${email}`);
     await page.keyboard.type(email, { delay: 10 }).catch(() => {});
     await page.keyboard.press("Enter").catch(() => {});
     await wait(page, 150);
   }
-  console.log(`✅ Added: ${emailText}`);
+  console.log(`✅ Added all ${batch.length} email(s)`);
 
   // Try to find the submit button - prioritize data-testid="submit" (it's a span, not a button!)
   console.log("🔍 Looking for submit button...");
@@ -606,6 +608,12 @@ async function fillEmailsAndSend(page, batch, campaignId, zightAccount, googleSh
       await logVideoSharesBatch(failedShares);
     }
     
+    // Log each failed email individually
+    console.log(`❌ Failed to send to ${batch.length} email(s):`);
+    batch.forEach((email, i) => {
+      console.log(`  ❌ [${i + 1}/${batch.length}] ${email} - Share limit reached`);
+    });
+    
     await screenshot(page, `error_cannot_update_invitations_${Date.now()}.png`);
     throw new Error("Cannot update invitations - Share limit reached (20 people max). Clear existing shares first.");
   }
@@ -647,6 +655,12 @@ async function fillEmailsAndSend(page, batch, campaignId, zightAccount, googleSh
       await logVideoSharesBatch(failedShares);
     }
     
+    // Log each failed email individually
+    console.log(`❌ Failed to send to ${batch.length} email(s):`);
+    batch.forEach((email, i) => {
+      console.log(`  ❌ [${i + 1}/${batch.length}] ${email} - ${errorMessage}`);
+    });
+    
     throw new Error("Error detected after clicking submit button");
   }
 
@@ -660,13 +674,17 @@ async function fillEmailsAndSend(page, batch, campaignId, zightAccount, googleSh
       status: "sent",
     }));
     await logVideoSharesBatch(successfulShares);
-    console.log(`💾 Logged ${batch.length} video share(s) to Supabase`);
+    console.log(`💾 Logged ${batch.length} successful share(s) to Supabase`);
   }
+
+  // Log each successful email individually
+  console.log(`✅ Successfully sent to ${batch.length} email(s):`);
+  batch.forEach((email, i) => {
+    console.log(`  ✅ [${i + 1}/${batch.length}] ${email}`);
+  });
 
   await page.keyboard.press("Escape").catch(() => {});
   await wait(page, 500);
-
-  console.log(`✅ Sent successfully: ${emailText}`);
 }
 
 // ========== CLEAR EXISTING SHARES ==========
@@ -865,11 +883,21 @@ async function runForAccount(page, account) {
     }
   }
 
-  console.log(`\n🏁 Finished: ${account.username} - Sent to ${totalEmails} email${totalEmails > 1 ? 's' : ''}`);
+  console.log(`\n🏁 ========== CAMPAIGN COMPLETE ==========`);
+  console.log(`✅ Account: ${account.username}`);
+  console.log(`📊 Total emails processed: ${totalEmails}`);
+  console.log(`📦 Super-batches used: ${superBatches.length}`);
   
   if (campaignNumber) {
-    console.log(`📊 Campaign #${campaignNumber} completed. Check Supabase for detailed stats.`);
+    console.log(`📋 Campaign: #${campaignNumber}`);
+    console.log(`🔗 Campaign ID: ${campaignId}`);
+    if (isSupabaseEnabled()) {
+      console.log(`💾 All video shares logged to Supabase`);
+      console.log(`🔍 View details: https://supabase.com/dashboard/project/jjemlpdbbztwmnmviblt`);
+    }
   }
+  
+  console.log(`========================================\n`);
 }
 
 // ========== CREATE BROWSER ==========
