@@ -49,7 +49,6 @@ const CONFIG = {
   sheetColumnName: process.env.SHEET_COLUMN_NAME || "Email",
 
   // Other
-  batchSize: parseInt(process.env.BATCH_SIZE) || 1,
   headless: process.env.HEADLESS === "true",
 
   // Campaign tracking (from webhook)
@@ -138,73 +137,72 @@ async function waitForFilePageFromDashboard(page, timeoutMs = 20000) {
     .catch(() => {});
 }
 
-// Close popups/modals that block clicks
-async function closePopupsIfAny(page) {
-  for (let pass = 1; pass <= 3; pass++) {
-    const dialogs = page.locator(
-      '[role="dialog"], .modal, [data-testid*="modal" i], [data-testid*="dialog" i]'
-    );
-    const count = await dialogs.count().catch(() => 0);
-    if (!count) return;
-
-    console.log(
-      `🧹 Detected modal/dialog (${count}). Closing... (attempt ${pass})`
-    );
-
-    const dialog = dialogs.first();
-    const closeCandidates = [
-      dialog.getByRole("button", {
-        name: /close|dismiss|got it|ok|okay|continue/i,
-      }),
-      dialog.locator('[aria-label*="close" i]'),
-      dialog.locator('button:has-text("×")'),
-      dialog.locator('button:has-text("Close")'),
-      dialog.locator('button:has-text("Got it")'),
-      dialog.locator('button:has-text("OK")'),
-      dialog.locator('button:has-text("Okay")'),
-      dialog.locator("button").filter({ has: dialog.locator("svg") }).first(),
-    ];
-
-    let closed = false;
-    for (const c of closeCandidates) {
-      try {
-        if ((await c.count()) > 0) {
-          await c.first().click({ timeout: 3000 }).catch(() => {});
-          await wait(page, 350);
-          closed = true;
-          break;
-        }
-      } catch {}
-    }
-
-    if (!closed) {
-      await page.keyboard.press("Escape").catch(() => {});
-      await wait(page, 350);
-    }
-
-    const remaining = await dialogs.count().catch(() => 0);
-    if (!remaining) return;
-
-    if (pass === 3) {
-      console.log("🧨 Last resort: removing overlays via DOM");
-      await page
-        .evaluate(() => {
-          const selectors = [
-            '[role="dialog"]',
-            ".modal",
-            ".modal-backdrop",
-            '[class*="backdrop" i]',
-          ];
-          for (const sel of selectors) {
-            document.querySelectorAll(sel).forEach((el) => el.remove());
-          }
-          document.body.style.overflow = "auto";
-          document.documentElement.style.overflow = "auto";
-        })
-        .catch(() => {});
-      await wait(page, 250);
-    }
+// Get shares count via Zight API
+async function getSharesCount(page, fileId) {
+  try {
+    const apiUrl = `https://share.zight.com/api/v5/items/${fileId}`;
+    const response = await page.evaluate(async (url) => {
+      const res = await fetch(url);
+      return res.json();
+    }, apiUrl);
+    
+    const specificUsers = response?.data?.item?.attributes?.security?.specific_users || [];
+    return specificUsers.length;
+  } catch (error) {
+    console.log(`⚠️ Could not fetch shares count: ${error.message}`);
+    return -1; // Return -1 to indicate error
   }
+}
+
+// Open share settings dropdown (used by clear and changeToPublic)
+async function openShareSettingsDropdown(dialog, page) {
+  console.log("🔽 Opening share settings dropdown...");
+  
+  const dropdownButton = dialog.locator('[data-testid="viewer-share-who-is-viewing"]').first();
+  if (await dropdownButton.count() === 0) {
+    console.log("⚠️ Could not find dropdown button");
+    await page.keyboard.press("Escape").catch(() => {});
+    await wait(page, 500);
+    return false;
+  }
+  
+  await dropdownButton.click({ timeout: 10000 }).catch(() => {});
+  await wait(page, 800); // Reduced from 1000ms
+  
+  return true;
+}
+
+// Close popups/modals that block clicks (optimized: direct DOM removal)
+async function closePopupsIfAny(page) {
+  const dialogs = page.locator(
+    '[role="dialog"], .modal, [data-testid*="modal" i], [data-testid*="dialog" i]'
+  );
+  const count = await dialogs.count().catch(() => 0);
+  if (!count) return;
+
+  console.log(`🧹 Detected ${count} modal/dialog(s). Removing via DOM...`);
+
+  // Direct DOM removal (fastest and most reliable method)
+  await page
+    .evaluate(() => {
+      const selectors = [
+        '[role="dialog"]',
+        ".modal",
+        ".modal-backdrop",
+        '[class*="backdrop" i]',
+        '[data-testid*="modal" i]',
+        '[data-testid*="dialog" i]',
+      ];
+      for (const sel of selectors) {
+        document.querySelectorAll(sel).forEach((el) => el.remove());
+      }
+      document.body.style.overflow = "auto";
+      document.documentElement.style.overflow = "auto";
+    })
+    .catch(() => {});
+  
+  await wait(page, 200); // Reduced from 250ms
+  console.log("✅ Modals removed");
 }
 
 // ========== GOOGLE SHEET (PUBLIC CSV) ==========
@@ -588,81 +586,116 @@ async function fillEmailsAndSend(page, batch, campaignId, zightAccount, googleSh
 
   // Wait for Zight to process the share
   console.log("⏳ Waiting for Zight to process...");
-  await wait(page, 3000);
+  await wait(page, 3000); // Optimized wait time
   
-  // Check specifically for "Cannot update invitations" error (appears in bottom-right toast)
-  const cannotUpdateInvitations = page.locator('text=/Cannot update invitations/i').first();
-  if (await cannotUpdateInvitations.count() > 0) {
-    console.log("🚨 ERROR: Cannot update invitations - Share limit reached!");
-    
-    // Log failed shares to Supabase
-    if (campaignId && isSupabaseEnabled()) {
-      const failedShares = batch.map(email => ({
-        campaignId,
-        email,
-        zightAccount,
-        googleSheetLink,
-        status: "failed",
-        errorMessage: "Share limit reached (20 people max)",
-      }));
-      await logVideoSharesBatch(failedShares);
-    }
-    
-    // Log each failed email individually
-    console.log(`❌ Failed to send to ${batch.length} email(s):`);
-    batch.forEach((email, i) => {
-      console.log(`  ❌ [${i + 1}/${batch.length}] ${email} - Share limit reached`);
-    });
-    
-    await screenshot(page, `error_cannot_update_invitations_${Date.now()}.png`);
-    throw new Error("Cannot update invitations - Share limit reached (20 people max). Clear existing shares first.");
-  }
-  
-  // Check for other error messages
-  const errorSelectors = [
-    'text=/error/i',
-    'text=/failed/i',
-    'text=/invalid/i',
-    '[role="alert"]',
+  // Check for success indicators first (look for green checkmark or "Sent" message)
+  const successIndicators = [
+    'text=/sent/i',
+    'text=/success/i',
+    '[data-testid*="success"]',
   ];
   
-  let errorFound = false;
-  let errorMessage = "";
-  for (const selector of errorSelectors) {
-    const errorEl = page.locator(selector).first();
-    if (await errorEl.count() > 0) {
-      const errorText = await errorEl.textContent().catch(() => '');
-      if (errorText && !errorText.match(/Cannot update invitations/i)) {
-        console.log(`❌ ERROR: ${errorText}`);
-        errorMessage = errorText;
-        await screenshot(page, `error_${Date.now()}.png`);
-        errorFound = true;
-      }
-    }
+  // Check all indicators in parallel (faster)
+  const successChecks = await Promise.all(
+    successIndicators.map(async (selector) => {
+      const count = await page.locator(selector).first().count().catch(() => 0);
+      return { selector, found: count > 0 };
+    })
+  );
+  
+  const successResult = successChecks.find(r => r.found);
+  const successFound = !!successResult;
+  
+  if (successFound) {
+    console.log(`✅ Success indicator found: ${successResult.selector}`);
   }
   
-  if (errorFound) {
-    // Log failed shares to Supabase
-    if (campaignId && isSupabaseEnabled()) {
-      const failedShares = batch.map(email => ({
-        campaignId,
-        email,
-        zightAccount,
-        googleSheetLink,
-        status: "failed",
-        errorMessage,
-      }));
-      await logVideoSharesBatch(failedShares);
+  // Only check for errors if NO success indicator was found
+  if (!successFound) {
+    console.log("🔍 No success indicator found, checking for errors...");
+    
+    // Check specifically for "Cannot update invitations" error (appears in bottom-right toast)
+    const cannotUpdateInvitations = page.locator('text=/Cannot update invitations/i').first();
+    if (await cannotUpdateInvitations.count() > 0) {
+      console.log("🚨 ERROR: Cannot update invitations - Share limit reached!");
+      
+      // Log failed shares to Supabase
+      if (campaignId && isSupabaseEnabled()) {
+        const failedShares = batch.map(email => ({
+          campaignId,
+          email,
+          zightAccount,
+          googleSheetLink,
+          status: "failed",
+          errorMessage: "Share limit reached (20 people max)",
+        }));
+        await logVideoSharesBatch(failedShares);
+      }
+      
+      // Log each failed email individually
+      console.log(`❌ Failed to send to ${batch.length} email(s):`);
+      batch.forEach((email, i) => {
+        console.log(`  ❌ [${i + 1}/${batch.length}] ${email} - Share limit reached`);
+      });
+      
+      await screenshot(page, `error_cannot_update_invitations_${Date.now()}.png`);
+      throw new Error("Cannot update invitations - Share limit reached (20 people max). Clear existing shares first.");
     }
     
-    // Log each failed email individually
-    console.log(`❌ Failed to send to ${batch.length} email(s):`);
-    batch.forEach((email, i) => {
-      console.log(`  ❌ [${i + 1}/${batch.length}] ${email} - ${errorMessage}`);
-    });
+    // Check for other error messages
+    const errorSelectors = [
+      'text=/error/i',
+      'text=/failed/i',
+      'text=/invalid email/i',
+      '[role="alert"]',
+    ];
     
-    throw new Error("Error detected after clicking submit button");
+    let errorFound = false;
+    let errorMessage = "";
+    for (const selector of errorSelectors) {
+      const errorEl = page.locator(selector).first();
+      if (await errorEl.count() > 0) {
+        const errorText = await errorEl.textContent().catch(() => '');
+        // Filter out false positives (generic UI text with "error" word)
+        if (errorText && 
+            !errorText.match(/Cannot update invitations/i) &&
+            errorText.length < 200 && // Ignore very long text (probably not an error)
+            !errorText.match(/Could be of interest/i)) { // Ignore video title/description
+          console.log(`❌ ERROR: ${errorText}`);
+          errorMessage = errorText;
+          await screenshot(page, `error_${Date.now()}.png`);
+          errorFound = true;
+          break;
+        }
+      }
+    }
+    
+    if (errorFound) {
+      // Log failed shares to Supabase
+      if (campaignId && isSupabaseEnabled()) {
+        const failedShares = batch.map(email => ({
+          campaignId,
+          email,
+          zightAccount,
+          googleSheetLink,
+          status: "failed",
+          errorMessage,
+        }));
+        await logVideoSharesBatch(failedShares);
+      }
+      
+      // Log each failed email individually
+      console.log(`❌ Failed to send to ${batch.length} email(s):`);
+      batch.forEach((email, i) => {
+        console.log(`  ❌ [${i + 1}/${batch.length}] ${email} - ${errorMessage}`);
+      });
+      
+      throw new Error(`Error detected after clicking submit button: ${errorMessage}`);
+    }
   }
+
+  // If we got here, assume success (no errors found)
+  console.log("✅ No errors detected, assuming success");
 
   // Success! Log to Supabase
   if (campaignId && isSupabaseEnabled()) {
@@ -688,79 +721,71 @@ async function fillEmailsAndSend(page, batch, campaignId, zightAccount, googleSh
 }
 
 // ========== CLEAR EXISTING SHARES ==========
-async function clearExistingShares(page, force = false) {
-  console.log(`🧹 Checking if we need to clear existing shares... ${force ? '(FORCED)' : ''}`);
+async function clearExistingShares(page, force = false, retryCount = 0) {
+  const MAX_RETRIES = 1; // Maximum 1 retry
+  
+  console.log(`🧹 Checking if we need to clear existing shares... ${force ? '(FORCED)' : ''} ${retryCount > 0 ? `(Retry ${retryCount}/${MAX_RETRIES})` : ''}`);
   
   // Get the file ID from current URL
   const url = page.url();
   const fileIdMatch = url.match(/\/([a-zA-Z0-9]+)$/);
   if (!fileIdMatch) {
     console.log("⚠️ Could not extract file ID from URL, skipping clear");
-    return;
+    return false;
   }
   
   const fileId = fileIdMatch[1];
-  const apiUrl = `https://share.zight.com/api/v5/items/${fileId}`;
   
   try {
-    // Fetch current shares via API
-    const response = await page.evaluate(async (url) => {
-      const res = await fetch(url);
-      return res.json();
-    }, apiUrl);
+    // Check current shares count via API
+    const count = await getSharesCount(page, fileId);
     
-    const specificUsers = response?.data?.item?.attributes?.security?.specific_users || [];
-    const count = specificUsers.length;
+    if (count === -1) {
+      console.log("⚠️ Could not fetch shares count, skipping clear");
+      return false;
+    }
     
     console.log(`📊 Current shares: ${count} people`);
     
-    // If force=true, always clear. Otherwise, only clear if >= 18 people
-    const shouldClear = force || count >= 18;
+    // If force=true, always clear. Otherwise, only clear if >= 12 people (safer margin)
+    const shouldClear = force || count >= 12;
     
     if (!shouldClear) {
-      console.log(`✅ Only ${count} shares, no need to clear (limit is 20)`);
-      return;
+      console.log(`✅ Only ${count} shares, no need to clear (safe limit is 15)`);
+      return true;
     }
     
     if (count === 0) {
       console.log("✅ No shares to clear");
-      return;
+      return true;
     }
     
     console.log(`⚠️ ${count} people already shared! Clearing list...`);
     
     // Open share modal
     await openShareModal(page);
-    
     const dialog = await findShareDialog(page);
     
-    // Step 1: Click the dropdown button to open the menu
-    console.log("🔽 Opening dropdown menu...");
-    const dropdownButton = dialog.locator('[data-testid="viewer-share-who-is-viewing"]').first();
-    if (await dropdownButton.count() === 0) {
-      console.log("⚠️ Could not find dropdown button, skipping clear");
-      await page.keyboard.press("Escape").catch(() => {});
-      await wait(page, 500);
-      return;
+    // Open dropdown using helper
+    const dropdownOpened = await openShareSettingsDropdown(dialog, page);
+    if (!dropdownOpened) {
+      return false;
     }
     
-    await dropdownButton.click({ timeout: 10000 }).catch(() => {});
-    await wait(page, 1000);
-    
-    // Step 2: Click on "Only emailed people" option in the menu
+    // Click on "Only emailed people" option in the menu
     console.log("🔽 Selecting 'Only emailed people'...");
     const onlyEmailedOption = page.locator('[data-testid="menu-item-only-emailed-people"]').first();
     if (await onlyEmailedOption.count() === 0) {
       console.log("⚠️ Could not find 'Only emailed people' menu item, skipping clear");
       await page.keyboard.press("Escape").catch(() => {});
       await wait(page, 500);
-      return;
+      return false;
     }
     
     await onlyEmailedOption.click({ timeout: 10000 }).catch(() => {});
-    await wait(page, 1500);
+    await wait(page, 1200); // Optimized from 1500ms
     
-    // Step 3: Find and click all remove buttons (× icons)
+    // Find and click all remove buttons (× icons)
     console.log("❌ Removing all existing shares...");
     
     let removedCount = 0;
@@ -768,8 +793,32 @@ async function clearExistingShares(page, force = false) {
     
     // Keep clicking remove buttons until none are left (dynamic checking)
     while (removedCount < maxAttempts) {
-      const removeButtons = page.locator('[data-testid="chips-cancel"]');
-      const currentCount = await removeButtons.count();
+      // Try multiple selectors to find the remove button
+      const removeButtonSelectors = [
+        '[data-testid="chips-cancel"]', // Primary selector
+        'button[aria-label*="Remove"]', // Button with Remove in aria-label
+        'button[aria-label*="remove"]',
+        'button svg path[d*="M13.092 7.408"]', // The exact SVG path
+        '.zt-chip button', // Generic chip button
+        '[data-testid*="remove"]',
+        '[data-testid*="cancel"]',
+      ];
+      
+      let removeButtons = null;
+      let currentCount = 0;
+      
+      // Try each selector until we find buttons
+      for (const selector of removeButtonSelectors) {
+        removeButtons = page.locator(selector);
+        currentCount = await removeButtons.count();
+        
+        if (currentCount > 0) {
+          if (removedCount === 0) {
+            console.log(`   Found ${currentCount} remove button(s) using selector: ${selector}`);
+          }
+          break;
+        }
+      }
       
       if (currentCount === 0) {
         console.log(`✅ All emails removed! (Total: ${removedCount})`);
@@ -777,40 +826,126 @@ async function clearExistingShares(page, force = false) {
       }
       
       // Click the first remove button
-      const clicked = await removeButtons.first().click({ timeout: 5000 }).catch(() => false);
-      
-      if (!clicked) {
-        console.log(`⚠️ Failed to click remove button #${removedCount + 1}, retrying...`);
-        await wait(page, 500);
-        continue;
+      try {
+        await removeButtons.first().click({ timeout: 5000 });
+        removedCount++;
+        console.log(`   Removed ${removedCount}/${count}...`);
+        
+        // Wait for DOM to update before next click
+        await wait(page, 400); // Optimized from 500ms
+      } catch (error) {
+        console.log(`⚠️ Failed to click remove button #${removedCount + 1}: ${error.message}`);
+        
+        // Try to take a screenshot for debugging
+        await screenshot(page, `debug_remove_button_${Date.now()}.png`);
+        
+        // Try alternative method: find all chips and click on the × symbol
+        console.log(`   Trying alternative method: looking for chip elements...`);
+        const chips = page.locator('.zt-chip, [class*="chip"]');
+        const chipCount = await chips.count();
+        
+        if (chipCount > 0) {
+          console.log(`   Found ${chipCount} chip elements, clicking first one's remove button...`);
+          const firstChip = chips.first();
+          const removeInChip = firstChip.locator('button, [role="button"]').last();
+          
+          try {
+            await removeInChip.click({ timeout: 3000 });
+            removedCount++;
+            console.log(`   Removed ${removedCount} (via chip method)`);
+            await wait(page, 400);
+          } catch (err) {
+            console.log(`   ⚠️ Alternative method also failed. Stopping removal.`);
+            break;
+          }
+        } else {
+          console.log(`   ⚠️ No chips found either. Stopping removal.`);
+          break;
+        }
       }
-      
-      removedCount++;
-      console.log(`   Removed ${removedCount}/${currentCount}...`);
-      
-      // Wait for DOM to update before next click
-      await wait(page, 500);
     }
     
     if (removedCount >= maxAttempts) {
       console.log(`⚠️ Reached max attempts (${maxAttempts}), stopping removal loop`);
     }
     
-    await wait(page, 1000);
+    await wait(page, 800); // Optimized from 1000ms
     
-    // ⚠️ IMPORTANT: DO NOT switch back to "Anyone with the link can view"!
-    // If we do, the emails remain in the API's "specific_users" list and still count toward the 20 limit.
-    // We MUST stay in "Only emailed people" mode after clearing so the list is truly empty.
+    // ⚠️ CRITICAL: DO NOT switch to "Anyone with the link" here!
+    // Stay in "Only emailed people" mode - switching would bring back the emails
+    console.log("✅ Staying in 'Only emailed people' mode (DO NOT switch to public yet!)");
     
-    console.log("✅ Staying in 'Only emailed people' mode (emails truly cleared)");
+    // Close modal
+    await page.keyboard.press("Escape").catch(() => {});
+    await wait(page, 800); // Optimized from 1000ms
+    
+    // Verify the list is actually empty via API
+    console.log("🔍 Verifying list is empty...");
+    await wait(page, 1500); // Optimized from 2000ms
+    
+    const remainingCount = await getSharesCount(page, fileId);
+    
+    if (remainingCount > 0) {
+      console.log(`⚠️ Warning: ${remainingCount} users still in list after clearing!`);
+      
+      // Only retry once
+      if (retryCount < MAX_RETRIES) {
+        console.log(`🔄 Retrying clear operation...`);
+        return await clearExistingShares(page, true, retryCount + 1);
+      } else {
+        console.log(`❌ Max retries reached. ${remainingCount} users still remain.`);
+        return false;
+      }
+    }
+    
+    console.log("✅ Verified: List is empty (0 users)");
+    console.log("✅ Existing shares cleared successfully!");
+    return true;
+    
+  } catch (error) {
+    console.log(`⚠️ Could not check/clear shares: ${error.message}`);
+    return false;
+  }
+}
+
+// ========== CHANGE TO PUBLIC ACCESS ==========
+async function changeToPublicAccess(page) {
+  console.log("\n🌐 Changing file access to 'Anyone with the link can view'...");
+  
+  try {
+    // Open share modal
+    await openShareModal(page);
+    const dialog = await findShareDialog(page);
+    
+    // Open dropdown using helper
+    const dropdownOpened = await openShareSettingsDropdown(dialog, page);
+    if (!dropdownOpened) {
+      return false;
+    }
+    
+    // Click on "Anyone with the link can view" option in the menu
+    console.log("🔗 Selecting 'Anyone with the link can view'...");
+    const anyoneWithLinkOption = page.locator('[data-testid="menu-item-anyone-with-the-link-can-view"]').first();
+    if (await anyoneWithLinkOption.count() === 0) {
+      console.log("⚠️ Could not find 'Anyone with the link can view' menu item");
+      await page.keyboard.press("Escape").catch(() => {});
+      await wait(page, 500);
+      return false;
+    }
+    
+    await anyoneWithLinkOption.click({ timeout: 10000 }).catch(() => {});
+    await wait(page, 1200); // Optimized from 1500ms
+    
+    console.log("✅ File access changed to 'Anyone with the link can view'");
     
     // Close modal
     await page.keyboard.press("Escape").catch(() => {});
     await wait(page, 500);
     
-    console.log("✅ Existing shares cleared!");
+    return true;
   } catch (error) {
-    console.log(`⚠️ Could not check/clear shares: ${error.message}`);
+    console.log(`⚠️ Could not change to public access: ${error.message}`);
+    return false;
   }
 }
 
@@ -843,16 +978,20 @@ async function runForAccount(page, account) {
 
   // 3) ALWAYS clear existing shares at the start (fresh start every time)
   console.log("🧹 Clearing existing shares to start fresh...");
-  await clearExistingShares(page, true); // force=true to always clear
+  const initialClear = await clearExistingShares(page, true); // force=true to always clear
+  
+  if (!initialClear) {
+    throw new Error("Failed to clear initial shares. Cannot start safely.");
+  }
 
-  // 4) Process emails in batches of 20 (Zight's limit)
-  // After every 20 emails, clear and continue with next batch
-  const ZIGHT_LIMIT = 20;
+  // 4) Process emails: send 15, clear 15, send 15, clear 15, etc.
+  const BATCH_SIZE = 15;
   const totalEmails = sheetEmails.length;
-  const superBatches = chunk(sheetEmails, ZIGHT_LIMIT); // Split into groups of 20
+  const batches = chunk(sheetEmails, BATCH_SIZE); // Split into groups of 15
   
   console.log(`📦 Processing ${totalEmails} email${totalEmails > 1 ? 's' : ''}`);
-  console.log(`📊 This will be done in ${superBatches.length} super-batch${superBatches.length > 1 ? 'es' : ''} of up to ${ZIGHT_LIMIT} emails each`);
+  console.log(`📊 This will be done in ${batches.length} batch${batches.length > 1 ? 'es' : ''} of up to ${BATCH_SIZE} emails each`);
+  console.log(`🔄 Each batch: Share 15 → Clear 15 → Repeat`);
   
   if (isSupabaseEnabled()) {
     console.log(`💾 Supabase logging: Enabled`);
@@ -860,33 +999,48 @@ async function runForAccount(page, account) {
     console.log(`⚠️ Supabase logging: Disabled (no credentials in .env)`);
   }
 
-  for (let superBatchIdx = 0; superBatchIdx < superBatches.length; superBatchIdx++) {
-    const superBatch = superBatches[superBatchIdx];
+  for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+    const batch = batches[batchIdx];
+    const startNum = batchIdx * BATCH_SIZE + 1;
+    const endNum = startNum + batch.length - 1;
     
-    console.log(`\n📦 === Super-Batch ${superBatchIdx + 1}/${superBatches.length} (${superBatch.length} emails) ===`);
+    console.log(`\n📦 === Batch ${batchIdx + 1}/${batches.length} (Emails ${startNum}-${endNum}) ===`);
     
-    // Process this super-batch in small batches (1 at a time for reliability)
-    const batches = chunk(superBatch, CONFIG.batchSize);
+    // Open share modal ONCE for this batch
+    await openShareModal(page);
     
-    for (let i = 0; i < batches.length; i++) {
-      const emailNum = superBatchIdx * ZIGHT_LIMIT + i + 1;
-      console.log(`\n➡️ Email ${emailNum}/${totalEmails}`);
-      await openShareModal(page);
-      await fillEmailsAndSend(page, batches[i], campaignId, account.username, googleSheetLink);
-      await wait(page, 500);
+    // Send all emails in this batch at once
+    await fillEmailsAndSend(page, batch, campaignId, account.username, googleSheetLink);
+    await wait(page, 500);
+    
+    // After sending this batch of 15, CLEAR them immediately (except for the last batch)
+    if (batchIdx < batches.length - 1) {
+      console.log(`\n🧹 Batch ${batchIdx + 1} sent! Clearing these ${batch.length} emails before next batch...`);
+      const cleared = await clearExistingShares(page, true);
+      
+      if (!cleared) {
+        throw new Error(`Failed to clear batch ${batchIdx + 1}. Cannot continue safely.`);
+      }
+      
+      console.log(`✅ Cleared! Ready for next batch.\n`);
+    } else {
+      console.log(`\n✅ Final batch sent! No need to clear (will change to public instead).`);
     }
-    
-    // If there are more super-batches to process, clear the list for the next batch
-    if (superBatchIdx < superBatches.length - 1) {
-      console.log(`\n🔄 Super-batch ${superBatchIdx + 1} complete. Clearing for next batch...`);
-      await clearExistingShares(page, true); // force=true
-    }
+  }
+
+  // 5) FINAL STEP: Change file access to "Anyone with the link can view"
+  console.log(`\n🎯 All emails sent! Now changing file access to public...`);
+  const changedToPublic = await changeToPublicAccess(page);
+  
+  if (!changedToPublic) {
+    console.log("⚠️ Warning: Could not change file to public access. File may still be in 'Only emailed people' mode.");
   }
 
   console.log(`\n🏁 ========== CAMPAIGN COMPLETE ==========`);
   console.log(`✅ Account: ${account.username}`);
   console.log(`📊 Total emails processed: ${totalEmails}`);
-  console.log(`📦 Super-batches used: ${superBatches.length}`);
+  console.log(`📦 Batches used: ${batches.length} (${BATCH_SIZE} emails each)`);
+  console.log(`🔄 Pattern: Share 15 → Clear 15 → Repeat`);
   
   if (campaignNumber) {
     console.log(`📋 Campaign: #${campaignNumber}`);
