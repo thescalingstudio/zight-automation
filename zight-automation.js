@@ -745,7 +745,7 @@ async function clearExistingShares(page, force = false, retryCount = 0) {
       return false;
     }
     
-    console.log(`📊 Current shares: ${count} people`);
+    console.log(`📊 Current shares (API): ${count} people`);
     
     // If force=true, always clear. Otherwise, only clear if >= 12 people (safer margin)
     const shouldClear = force || count >= 12;
@@ -755,12 +755,18 @@ async function clearExistingShares(page, force = false, retryCount = 0) {
       return true;
     }
     
-    if (count === 0) {
+    // IMPORTANT: When force=true and count=0, don't trust API blindly!
+    // The API may be out of sync with the UI (known issue)
+    if (count === 0 && !force) {
       console.log("✅ No shares to clear");
       return true;
     }
     
-    console.log(`⚠️ ${count} people already shared! Clearing list...`);
+    if (count === 0 && force) {
+      console.log("📊 API says 0, but force=true - checking visually to be sure...");
+    } else {
+      console.log(`⚠️ ${count} people already shared! Clearing list...`);
+    }
     
     // Open share modal
     await openShareModal(page);
@@ -829,7 +835,9 @@ async function clearExistingShares(page, force = false, retryCount = 0) {
       try {
         await removeButtons.first().click({ timeout: 5000 });
         removedCount++;
-        console.log(`   Removed ${removedCount}/${count}...`);
+        // Show progress (use visual count if API count was 0)
+        const displayCount = count > 0 ? count : 'unknown';
+        console.log(`   Removed ${removedCount}/${displayCount}...`);
         
         // Wait for DOM to update before next click (increased for reliability)
         await wait(page, 600); // Increased to let Zight process each removal
