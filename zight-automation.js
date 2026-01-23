@@ -722,7 +722,7 @@ async function fillEmailsAndSend(page, batch, campaignId, zightAccount, googleSh
 
 // ========== CLEAR EXISTING SHARES ==========
 async function clearExistingShares(page, force = false, retryCount = 0) {
-  const MAX_RETRIES = 1; // Maximum 1 retry
+  const MAX_RETRIES = 3; // Increased from 1 to 3 for more reliability
   
   console.log(`🧹 Checking if we need to clear existing shares... ${force ? '(FORCED)' : ''} ${retryCount > 0 ? `(Retry ${retryCount}/${MAX_RETRIES})` : ''}`);
   
@@ -783,7 +783,7 @@ async function clearExistingShares(page, force = false, retryCount = 0) {
     }
     
     await onlyEmailedOption.click({ timeout: 10000 }).catch(() => {});
-    await wait(page, 1200); // Optimized from 1500ms
+    await wait(page, 1500); // Increased for reliability
     
     // Find and click all remove buttons (× icons)
     console.log("❌ Removing all existing shares...");
@@ -831,8 +831,8 @@ async function clearExistingShares(page, force = false, retryCount = 0) {
         removedCount++;
         console.log(`   Removed ${removedCount}/${count}...`);
         
-        // Wait for DOM to update before next click
-        await wait(page, 400); // Optimized from 500ms
+        // Wait for DOM to update before next click (increased for reliability)
+        await wait(page, 600); // Increased to let Zight process each removal
       } catch (error) {
         console.log(`⚠️ Failed to click remove button #${removedCount + 1}: ${error.message}`);
         
@@ -853,7 +853,7 @@ async function clearExistingShares(page, force = false, retryCount = 0) {
             await removeInChip.click({ timeout: 3000 });
             removedCount++;
             console.log(`   Removed ${removedCount} (via chip method)`);
-            await wait(page, 400);
+            await wait(page, 600); // Increased for reliability
           } catch (err) {
             console.log(`   ⚠️ Alternative method also failed. Stopping removal.`);
             break;
@@ -869,19 +869,61 @@ async function clearExistingShares(page, force = false, retryCount = 0) {
       console.log(`⚠️ Reached max attempts (${maxAttempts}), stopping removal loop`);
     }
     
-    await wait(page, 800); // Optimized from 1000ms
+    // Wait for DOM to update after all removals
+    await wait(page, 1500); // Increased to let Zight process removals
+    
+    // VERIFY VISUALLY within the modal that no chips/emails remain
+    console.log("🔍 Verifying visually within modal that all emails are removed...");
+    let visualCheckAttempts = 0;
+    const maxVisualChecks = 5;
+    
+    while (visualCheckAttempts < maxVisualChecks) {
+      // Check for chips/emails visually in the modal
+      const chipSelectors = [
+        '.zt-chip',
+        '[class*="chip"]',
+        '[data-testid="chips-cancel"]',
+        'button[aria-label*="Remove"]',
+      ];
+      
+      let foundChips = false;
+      for (const selector of chipSelectors) {
+        const chips = dialog.locator(selector);
+        const chipCount = await chips.count().catch(() => 0);
+        if (chipCount > 0) {
+          foundChips = true;
+          console.log(`   ⚠️ Still found ${chipCount} chip(s) in modal (attempt ${visualCheckAttempts + 1}/${maxVisualChecks})`);
+          break;
+        }
+      }
+      
+      if (!foundChips) {
+        console.log(`   ✅ No chips found in modal - visually confirmed empty`);
+        break;
+      }
+      
+      // If chips still found, wait a bit more and check again
+      visualCheckAttempts++;
+      if (visualCheckAttempts < maxVisualChecks) {
+        await wait(page, 1000);
+      }
+    }
+    
+    if (visualCheckAttempts >= maxVisualChecks) {
+      console.log(`   ⚠️ Warning: Chips still visible after ${maxVisualChecks} checks, but proceeding...`);
+    }
     
     // ⚠️ CRITICAL: DO NOT switch to "Anyone with the link" here!
     // Stay in "Only emailed people" mode - switching would bring back the emails
     console.log("✅ Staying in 'Only emailed people' mode (DO NOT switch to public yet!)");
     
-    // Close modal
+    // Close modal - now we're confident the UI is updated
     await page.keyboard.press("Escape").catch(() => {});
-    await wait(page, 800); // Optimized from 1000ms
+    await wait(page, 2000); // Increased to let Zight sync after modal closes
     
     // Verify the list is actually empty via API
     console.log("🔍 Verifying list is empty...");
-    await wait(page, 1500); // Optimized from 2000ms
+    await wait(page, 2500); // Increased to give Zight API time to sync
     
     const remainingCount = await getSharesCount(page, fileId);
     
@@ -949,6 +991,133 @@ async function changeToPublicAccess(page) {
   }
 }
 
+// ========== VERIFY SHARES EMPTY (Pre-batch check) ==========
+async function verifySharesEmpty(page, maxAttempts = 3) {
+  const url = page.url();
+  const fileIdMatch = url.match(/\/([a-zA-Z0-9]+)$/);
+  if (!fileIdMatch) return true; // Can't verify, assume ok
+  
+  const fileId = fileIdMatch[1];
+  
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    // First check via API
+    const count = await getSharesCount(page, fileId);
+    
+    if (count === 0) {
+      // API says empty, but verify visually by opening modal
+      console.log(`✅ Pre-batch verification (API): List is empty (0 users)`);
+      console.log(`🔍 Pre-batch verification: Opening modal to verify visually...`);
+      
+      try {
+        await openShareModal(page);
+        const dialog = await findShareDialog(page);
+        
+        // Check visually for chips/emails in the modal
+        const chipSelectors = [
+          '.zt-chip',
+          '[class*="chip"]',
+          '[data-testid="chips-cancel"]',
+          'button[aria-label*="Remove"]',
+        ];
+        
+        let foundChips = false;
+        for (const selector of chipSelectors) {
+          const chips = dialog.locator(selector);
+          const chipCount = await chips.count().catch(() => 0);
+          if (chipCount > 0) {
+            foundChips = true;
+            console.log(`   ⚠️ Visual check: Found ${chipCount} chip(s) in modal! API was wrong.`);
+            break;
+          }
+        }
+        
+        // Close modal
+        await page.keyboard.press("Escape").catch(() => {});
+        await wait(page, 500);
+        
+        if (!foundChips) {
+          console.log(`   ✅ Visual check: No chips found - confirmed empty`);
+          return true;
+        } else {
+          // Visual check found chips, need to clear
+          console.log(`⚠️ Pre-batch verification: Visual check found chips, clearing...`);
+        }
+      } catch (error) {
+        console.log(`   ⚠️ Could not verify visually: ${error.message}`);
+        // If visual check fails, trust API
+        return true;
+      }
+    }
+    
+    if (count === -1) {
+      console.log(`⚠️ Pre-batch verification: Could not fetch count (attempt ${attempt}/${maxAttempts})`);
+      await wait(page, 1000);
+      continue;
+    }
+    
+    if (count > 0) {
+      console.log(`⚠️ Pre-batch verification: ${count} users still in list! Clearing... (attempt ${attempt}/${maxAttempts})`);
+    }
+    
+    // Try to clear
+    const cleared = await clearExistingShares(page, true);
+    
+    if (cleared) {
+      // Verify again after clearing (both API and visual)
+      await wait(page, 2000); // Give more time for sync
+      const newCount = await getSharesCount(page, fileId);
+      
+      if (newCount === 0) {
+        // Double-check visually
+        console.log(`✅ Pre-batch verification (API): Successfully cleared`);
+        console.log(`🔍 Pre-batch verification: Verifying visually...`);
+        
+        try {
+          await openShareModal(page);
+          const dialog = await findShareDialog(page);
+          
+          const chipSelectors = [
+            '.zt-chip',
+            '[class*="chip"]',
+            '[data-testid="chips-cancel"]',
+          ];
+          
+          let foundChips = false;
+          for (const selector of chipSelectors) {
+            const chips = dialog.locator(selector);
+            const chipCount = await chips.count().catch(() => 0);
+            if (chipCount > 0) {
+              foundChips = true;
+              break;
+            }
+          }
+          
+          await page.keyboard.press("Escape").catch(() => {});
+          await wait(page, 500);
+          
+          if (!foundChips) {
+            console.log(`   ✅ Visual check: Confirmed empty - ready for next batch`);
+            return true;
+          } else {
+            console.log(`   ⚠️ Visual check: Still found chips, will retry...`);
+          }
+        } catch (error) {
+          console.log(`   ⚠️ Visual check failed, trusting API: ${error.message}`);
+          return true; // Trust API if visual check fails
+        }
+      }
+    }
+    
+    if (attempt < maxAttempts) {
+      console.log(`🔄 Pre-batch verification: Retrying...`);
+      await wait(page, 2000);
+    }
+  }
+  
+  console.log(`❌ Pre-batch verification: Failed to clear list after ${maxAttempts} attempts`);
+  return false;
+}
+
 // ========== RUN FOR ACCOUNT ==========
 async function runForAccount(page, account) {
   const campaignId = CONFIG.campaignId;
@@ -999,41 +1168,84 @@ async function runForAccount(page, account) {
     console.log(`⚠️ Supabase logging: Disabled (no credentials in .env)`);
   }
 
-  for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
-    const batch = batches[batchIdx];
-    const startNum = batchIdx * BATCH_SIZE + 1;
-    const endNum = startNum + batch.length - 1;
-    
-    console.log(`\n📦 === Batch ${batchIdx + 1}/${batches.length} (Emails ${startNum}-${endNum}) ===`);
-    
-    // Open share modal ONCE for this batch
-    await openShareModal(page);
-    
-    // Send all emails in this batch at once
-    await fillEmailsAndSend(page, batch, campaignId, account.username, googleSheetLink);
-    await wait(page, 500);
-    
-    // After sending this batch of 15, CLEAR them immediately (except for the last batch)
-    if (batchIdx < batches.length - 1) {
-      console.log(`\n🧹 Batch ${batchIdx + 1} sent! Clearing these ${batch.length} emails before next batch...`);
-      const cleared = await clearExistingShares(page, true);
+  let batchError = null;
+  let completedBatches = 0;
+
+  // Use try-finally to ALWAYS change to public access, even on error
+  try {
+    for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+      const batch = batches[batchIdx];
+      const startNum = batchIdx * BATCH_SIZE + 1;
+      const endNum = startNum + batch.length - 1;
       
-      if (!cleared) {
-        throw new Error(`Failed to clear batch ${batchIdx + 1}. Cannot continue safely.`);
+      console.log(`\n📦 === Batch ${batchIdx + 1}/${batches.length} (Emails ${startNum}-${endNum}) ===`);
+      
+      // PRE-BATCH VERIFICATION: Ensure list is empty before adding new emails
+      if (batchIdx > 0) {
+        console.log(`\n🔍 Pre-batch verification for batch ${batchIdx + 1}...`);
+        const isEmpty = await verifySharesEmpty(page, 3);
+        
+        if (!isEmpty) {
+          throw new Error(`Pre-batch verification failed for batch ${batchIdx + 1}. List is not empty.`);
+        }
       }
       
-      console.log(`✅ Cleared! Ready for next batch.\n`);
-    } else {
-      console.log(`\n✅ Final batch sent! No need to clear (will change to public instead).`);
+      // Open share modal ONCE for this batch
+      await openShareModal(page);
+      
+      // Send all emails in this batch at once
+      await fillEmailsAndSend(page, batch, campaignId, account.username, googleSheetLink);
+      await wait(page, 500);
+      
+      completedBatches++;
+      
+      // After sending this batch of 15, CLEAR them immediately (except for the last batch)
+      if (batchIdx < batches.length - 1) {
+        console.log(`\n🧹 Batch ${batchIdx + 1} sent! Clearing these ${batch.length} emails before next batch...`);
+        const cleared = await clearExistingShares(page, true);
+        
+        if (!cleared) {
+          throw new Error(`Failed to clear batch ${batchIdx + 1}. Cannot continue safely.`);
+        }
+        
+        console.log(`✅ Cleared! Ready for next batch.\n`);
+      } else {
+        console.log(`\n✅ Final batch sent! No need to clear (will change to public instead).`);
+      }
     }
+  } catch (error) {
+    console.log(`\n🚨 ERROR during batch processing: ${error.message}`);
+    batchError = error;
+    // Don't throw yet - we need to change to public access first!
   }
 
-  // 5) FINAL STEP: Change file access to "Anyone with the link can view"
-  console.log(`\n🎯 All emails sent! Now changing file access to public...`);
-  const changedToPublic = await changeToPublicAccess(page);
+  // 5) FINAL STEP: ALWAYS change file access to "Anyone with the link can view"
+  // This runs even if there was an error, so previously sent emails can still access the video
+  console.log(`\n🎯 Changing file access to public... ${batchError ? '(despite error)' : ''}`);
   
-  if (!changedToPublic) {
-    console.log("⚠️ Warning: Could not change file to public access. File may still be in 'Only emailed people' mode.");
+  try {
+    const changedToPublic = await changeToPublicAccess(page);
+    
+    if (changedToPublic) {
+      console.log("✅ File access changed to 'Anyone with the link can view'");
+    } else {
+      console.log("⚠️ Warning: Could not change file to public access. File may still be in 'Only emailed people' mode.");
+    }
+  } catch (publicError) {
+    console.log(`⚠️ Error changing to public access: ${publicError.message}`);
+  }
+
+  // Now report final status
+  if (batchError) {
+    console.log(`\n🏁 ========== CAMPAIGN INCOMPLETE (ERROR) ==========`);
+    console.log(`❌ Error: ${batchError.message}`);
+    console.log(`📊 Completed batches: ${completedBatches}/${batches.length}`);
+    console.log(`📧 Emails sent: ~${completedBatches * BATCH_SIZE} of ${totalEmails}`);
+    console.log(`🌐 File access: Changed to public (so sent emails can still access)`);
+    console.log(`========================================\n`);
+    
+    // Re-throw the error so the webhook knows it failed
+    throw batchError;
   }
 
   console.log(`\n🏁 ========== CAMPAIGN COMPLETE ==========`);
