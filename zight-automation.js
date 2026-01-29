@@ -721,123 +721,192 @@ async function fillEmailsAndSend(page, batch, campaignId, zightAccount, googleSh
 }
 
 // ========== CLEAR EXISTING SHARES ==========
-// Simplified: Always clear without relying on API verification
-// Just open modal, switch to "Only emailed people", remove all chips found
+// Robust clearing: handles large lists (1000+ emails), retries on failure
+// Always opens modal, switches to "Only emailed people", removes ALL chips found
 async function clearExistingShares(page, force = false) {
   console.log(`🧹 Clearing existing shares...`);
   
-  try {
-    // Open share modal
-    await openShareModal(page);
-    const dialog = await findShareDialog(page);
-    
-    // Open dropdown using helper
-    const dropdownOpened = await openShareSettingsDropdown(dialog, page);
-    if (!dropdownOpened) {
-      return false;
-    }
-    
-    // Click on "Only emailed people" option - this reveals the chips
-    console.log("🔽 Selecting 'Only emailed people' to reveal any existing shares...");
-    const onlyEmailedOption = page.locator('[data-testid="menu-item-only-emailed-people"]').first();
-    if (await onlyEmailedOption.count() === 0) {
-      console.log("⚠️ Could not find 'Only emailed people' menu item");
-      await page.keyboard.press("Escape").catch(() => {});
-      await wait(page, 500);
-      return false;
-    }
-    
-    await onlyEmailedOption.click({ timeout: 10000 }).catch(() => {});
-    await wait(page, 1500);
-    
-    // Remove ALL chips found (don't check API, just remove whatever is there)
-    console.log("❌ Removing any existing shares...");
-    
-    let removedCount = 0;
-    const maxAttempts = 50; // Safety limit
-    
-    const removeButtonSelectors = [
-      '[data-testid="chips-cancel"]',
-      'button[aria-label*="Remove"]',
-      'button[aria-label*="remove"]',
-      'button svg path[d*="M13.092 7.408"]',
-      '.zt-chip button',
-      '[data-testid*="remove"]',
-      '[data-testid*="cancel"]',
-    ];
-    
-    while (removedCount < maxAttempts) {
-      let removeButtons = null;
-      let currentCount = 0;
+  const MAX_CLEAR_ATTEMPTS = 3; // Retry the entire clear process if needed
+  
+  for (let attempt = 1; attempt <= MAX_CLEAR_ATTEMPTS; attempt++) {
+    try {
+      // Open share modal
+      await openShareModal(page);
+      const dialog = await findShareDialog(page);
       
-      // Try each selector until we find buttons
-      for (const selector of removeButtonSelectors) {
-        removeButtons = page.locator(selector);
-        currentCount = await removeButtons.count().catch(() => 0);
-        
-        if (currentCount > 0) {
-          if (removedCount === 0) {
-            console.log(`   Found ${currentCount} email(s) to remove`);
-          }
-          break;
-        }
+      // Open dropdown using helper
+      const dropdownOpened = await openShareSettingsDropdown(dialog, page);
+      if (!dropdownOpened) {
+        console.log(`⚠️ Attempt ${attempt}: Could not open dropdown`);
+        continue;
       }
       
-      // No more chips found - we're done!
-      if (currentCount === 0) {
-        if (removedCount === 0) {
-          console.log(`✅ No emails to remove - list is already empty`);
-        } else {
-          console.log(`✅ All ${removedCount} email(s) removed!`);
-        }
-        break;
-      }
-      
-      // Click the first remove button
-      try {
-        await removeButtons.first().click({ timeout: 5000 });
-        removedCount++;
-        console.log(`   Removed ${removedCount}...`);
+      // Click on "Only emailed people" option - this reveals the chips
+      console.log("🔽 Selecting 'Only emailed people' to reveal any existing shares...");
+      const onlyEmailedOption = page.locator('[data-testid="menu-item-only-emailed-people"]').first();
+      if (await onlyEmailedOption.count() === 0) {
+        console.log("⚠️ Could not find 'Only emailed people' menu item");
+        await page.keyboard.press("Escape").catch(() => {});
         await wait(page, 500);
-      } catch (error) {
-        // Try alternative: click chip directly
-        const chips = page.locator('.zt-chip, [class*="chip"]');
-        const chipCount = await chips.count().catch(() => 0);
+        continue;
+      }
+      
+      await onlyEmailedOption.click({ timeout: 10000 }).catch(() => {});
+      
+      // CRITICAL: Wait longer for Zight to load all chips (especially for large lists)
+      // With 1000+ emails, Zight needs time to render all chips
+      await wait(page, 3000);
+      
+      // Remove ALL chips found (don't check API, just remove whatever is there)
+      console.log("❌ Removing any existing shares...");
+      
+      let removedCount = 0;
+      let consecutiveFailures = 0;
+      const maxAttempts = 2500; // Increased from 50 to handle 1000+ emails
+      const maxConsecutiveFailures = 10; // Stop if we fail 10 times in a row
+      
+      const removeButtonSelectors = [
+        '[data-testid="chips-cancel"]',
+        'button[aria-label*="Remove"]',
+        'button[aria-label*="remove"]',
+        'button svg path[d*="M13.092 7.408"]',
+        '.zt-chip button',
+        '[data-testid*="remove"]',
+        '[data-testid*="cancel"]',
+      ];
+      
+      while (removedCount < maxAttempts && consecutiveFailures < maxConsecutiveFailures) {
+        let removeButtons = null;
+        let currentCount = 0;
         
-        if (chipCount > 0) {
-          try {
-            const removeInChip = chips.first().locator('button, [role="button"]').last();
-            await removeInChip.click({ timeout: 3000 });
-            removedCount++;
-            console.log(`   Removed ${removedCount} (via chip method)`);
-            await wait(page, 500);
-          } catch {
-            console.log(`   ⚠️ Could not remove chip, stopping`);
+        // Try each selector until we find buttons
+        for (const selector of removeButtonSelectors) {
+          removeButtons = page.locator(selector);
+          currentCount = await removeButtons.count().catch(() => 0);
+          
+          if (currentCount > 0) {
+            if (removedCount === 0) {
+              console.log(`   Found ${currentCount} email(s) to remove`);
+            }
             break;
           }
+        }
+        
+        // No more chips found - we might be done, but let's verify
+        if (currentCount === 0) {
+          // Wait a bit and check again (chips might still be loading)
+          if (removedCount === 0) {
+            await wait(page, 1000);
+            // Check one more time
+            let finalCheck = 0;
+            for (const selector of removeButtonSelectors) {
+              finalCheck = await page.locator(selector).count().catch(() => 0);
+              if (finalCheck > 0) break;
+            }
+            if (finalCheck === 0) {
+              console.log(`✅ No emails to remove - list is already empty`);
+              break;
+            } else {
+              console.log(`   Found ${finalCheck} email(s) after waiting`);
+              continue; // Continue the loop
+            }
+          } else {
+            console.log(`✅ All ${removedCount} email(s) removed!`);
+            break;
+          }
+        }
+        
+        // Click the first remove button
+        let clickSuccess = false;
+        try {
+          await removeButtons.first().click({ timeout: 3000 });
+          clickSuccess = true;
+        } catch (error) {
+          // Try alternative: click chip's X button directly
+          const chips = page.locator('.zt-chip, [class*="chip"]');
+          const chipCount = await chips.count().catch(() => 0);
+          
+          if (chipCount > 0) {
+            try {
+              const removeInChip = chips.first().locator('button, [role="button"]').last();
+              await removeInChip.click({ timeout: 2000 });
+              clickSuccess = true;
+            } catch {
+              // Try clicking the SVG path directly
+              try {
+                const svgPath = page.locator('svg path[d*="M13.092 7.408"]').first();
+                await svgPath.click({ timeout: 2000 });
+                clickSuccess = true;
+              } catch {
+                clickSuccess = false;
+              }
+            }
+          }
+        }
+        
+        if (clickSuccess) {
+          removedCount++;
+          consecutiveFailures = 0; // Reset failure counter
+          // Log progress every 10 removals (less verbose for large lists)
+          if (removedCount <= 10 || removedCount % 50 === 0) {
+            console.log(`   Removed ${removedCount}...`);
+          }
+          await wait(page, 400); // Slightly faster for large lists
         } else {
-          break;
+          consecutiveFailures++;
+          console.log(`   ⚠️ Click failed (${consecutiveFailures}/${maxConsecutiveFailures}), retrying...`);
+          await wait(page, 500);
         }
       }
+      
+      if (consecutiveFailures >= maxConsecutiveFailures) {
+        console.log(`⚠️ Too many consecutive failures, will retry entire clear process`);
+        await page.keyboard.press("Escape").catch(() => {});
+        await wait(page, 1000);
+        continue; // Retry the entire process
+      }
+      
+      // Wait for Zight to process final state
+      await wait(page, 1500);
+      
+      // VERIFICATION: Check if list is truly empty before closing
+      let verifyCount = 0;
+      for (const selector of removeButtonSelectors) {
+        verifyCount = await page.locator(selector).count().catch(() => 0);
+        if (verifyCount > 0) break;
+      }
+      
+      if (verifyCount > 0) {
+        console.log(`⚠️ Verification failed: Still ${verifyCount} chip(s) remaining after clear`);
+        if (attempt < MAX_CLEAR_ATTEMPTS) {
+          console.log(`   Will retry entire clear process (attempt ${attempt + 1}/${MAX_CLEAR_ATTEMPTS})`);
+          await page.keyboard.press("Escape").catch(() => {});
+          await wait(page, 1000);
+          continue; // Retry
+        }
+      }
+      
+      // Close modal
+      console.log("✅ Clear complete - closing modal");
+      await page.keyboard.press("Escape").catch(() => {});
+      await wait(page, 1000);
+      
+      return true;
+      
+    } catch (error) {
+      console.log(`⚠️ Error during clear (attempt ${attempt}): ${error.message}`);
+      // Try to close any open modal
+      await page.keyboard.press("Escape").catch(() => {});
+      await wait(page, 500);
+      
+      if (attempt === MAX_CLEAR_ATTEMPTS) {
+        return false;
+      }
     }
-    
-    // Wait for Zight to process
-    await wait(page, 1000);
-    
-    // Close modal
-    console.log("✅ Clear complete - closing modal");
-    await page.keyboard.press("Escape").catch(() => {});
-    await wait(page, 1000);
-    
-    return true;
-    
-  } catch (error) {
-    console.log(`⚠️ Error during clear: ${error.message}`);
-    // Try to close any open modal
-    await page.keyboard.press("Escape").catch(() => {});
-    await wait(page, 500);
-    return false;
   }
+  
+  console.log(`❌ Clear failed after ${MAX_CLEAR_ATTEMPTS} attempts`);
+  return false;
 }
 
 // ========== CHANGE TO PUBLIC ACCESS ==========
